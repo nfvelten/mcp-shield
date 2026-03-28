@@ -55,6 +55,7 @@ agents:
     rate_limit: 10
 
 rules:
+  # ip_rate_limit: 100  # max tools/call per minute per IP (HTTP mode)
   block_patterns:
     - "password"
     - "api_key"

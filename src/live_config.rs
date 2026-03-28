@@ -11,17 +11,20 @@ pub struct LiveConfig {
     /// Reverse map: api_key → agent_name.
     /// Used for key-based agent identity on `initialize`.
     pub api_keys: HashMap<String, String>,
+    /// Max requests per minute per IP (HTTP mode). None = unlimited.
+    pub ip_rate_limit: Option<usize>,
 }
 
 impl LiveConfig {
     pub fn new(
         agents: HashMap<String, AgentPolicy>,
         block_patterns: Vec<Regex>,
+        ip_rate_limit: Option<usize>,
     ) -> Self {
         let api_keys = agents
             .iter()
             .filter_map(|(name, p)| p.api_key.as_ref().map(|k| (k.clone(), name.clone())))
             .collect();
-        Self { agents, block_patterns, api_keys }
+        Self { agents, block_patterns, api_keys, ip_rate_limit }
     }
 }

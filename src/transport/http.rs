@@ -7,7 +7,7 @@ use crate::{
 };
 use async_trait::async_trait;
 use axum::{
-    extract::State,
+    extract::{ConnectInfo, State},
     http::{HeaderMap, HeaderValue, StatusCode},
     response::IntoResponse,
     routing::{delete, get, post},
@@ -16,7 +16,7 @@ use axum::{
 use axum::response::sse::{Event, KeepAlive, Sse};
 use futures_util::StreamExt;
 use serde_json::Value;
-use std::{collections::HashMap, convert::Infallible, sync::Arc, time::Instant};
+use std::{collections::HashMap, convert::Infallible, net::SocketAddr, sync::Arc, time::Instant};
 use tokio::sync::{watch, Mutex};
 use uuid::Uuid;
 
@@ -112,9 +112,12 @@ impl Transport for HttpTransport {
         } else {
             tracing::info!(addr = %self.addr, "HTTP mode listening");
             let listener = tokio::net::TcpListener::bind(&self.addr).await?;
-            axum::serve(listener, app)
-                .with_graceful_shutdown(shutdown_signal())
-                .await?;
+            axum::serve(
+                listener,
+                app.into_make_service_with_connect_info::<SocketAddr>(),
+            )
+            .with_graceful_shutdown(shutdown_signal())
+            .await?;
             Ok(())
         }
     }
@@ -137,7 +140,7 @@ async fn serve_tls(app: Router, addr: &str, cert: &str, key: &str) -> anyhow::Re
 
     axum_server::bind_rustls(addr, tls_config)
         .handle(handle)
-        .serve(app.into_make_service())
+        .serve(app.into_make_service_with_connect_info::<SocketAddr>())
         .await?;
     Ok(())
 }
@@ -165,9 +168,11 @@ async fn shutdown_signal() {
 
 async fn handle_mcp(
     State(state): State<Arc<HttpState>>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
     headers: HeaderMap,
     Json(msg): Json<Value>,
 ) -> impl IntoResponse {
+    let client_ip = Some(peer.ip().to_string());
     let method = msg["method"].as_str().unwrap_or("");
 
     // initialize: resolve agent identity, validate api_key, create session
@@ -207,7 +212,7 @@ async fn handle_mcp(
         let session_id = state.sessions.create(agent_name.clone()).await;
         tracing::info!(session_id, agent = agent_name, "session created");
 
-        return match state.gateway.handle(&agent_name, msg).await {
+        return match state.gateway.handle(&agent_name, msg, client_ip).await {
             Some(response) => {
                 let mut res = Json(response).into_response();
                 if let Ok(val) = HeaderValue::from_str(&session_id) {
@@ -220,7 +225,7 @@ async fn handle_mcp(
     }
 
     match resolve_agent(&state.sessions, &headers).await {
-        Ok(agent_id) => match state.gateway.handle(&agent_id, msg).await {
+        Ok(agent_id) => match state.gateway.handle(&agent_id, msg, client_ip).await {
             Some(response) => Json(response).into_response(),
             None => StatusCode::ACCEPTED.into_response(),
         },

@@ -53,6 +53,15 @@ impl McpGateway {
     /// `None` = allowed, `Some(error)` = blocked.
     /// Used by StdioTransport, which manages piping directly.
     pub async fn intercept(&self, agent_id: &str, msg: &Value) -> Option<Value> {
+        self.intercept_with_ip(agent_id, msg, None).await
+    }
+
+    pub async fn intercept_with_ip(
+        &self,
+        agent_id: &str,
+        msg: &Value,
+        client_ip: Option<String>,
+    ) -> Option<Value> {
         let method = msg["method"].as_str().unwrap_or("");
 
         if method != "tools/call" {
@@ -76,6 +85,7 @@ impl McpGateway {
             method: method.to_string(),
             tool_name: tool_name.clone(),
             arguments,
+            client_ip,
         };
 
         match self.pipeline.run(&ctx).await {
@@ -110,10 +120,10 @@ impl McpGateway {
 
     /// Policy check + upstream forwarding + response filtering.
     /// Used by HttpTransport.
-    pub async fn handle(&self, agent_id: &str, msg: Value) -> Option<Value> {
+    pub async fn handle(&self, agent_id: &str, msg: Value, client_ip: Option<String>) -> Option<Value> {
         let method = msg["method"].as_str().unwrap_or("").to_string();
 
-        match self.intercept(agent_id, &msg).await {
+        match self.intercept_with_ip(agent_id, &msg, client_ip).await {
             Some(err) => Some(err),
             None => {
                 let response = self.upstream_for(agent_id).forward(&msg).await;

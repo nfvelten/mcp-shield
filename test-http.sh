@@ -447,6 +447,46 @@ kill "$RELOAD_PID" 2>/dev/null || true
 RELOAD_PID=""
 rm -f "$RELOAD_CONFIG"
 
+# ══ NEW: IP rate limit ════════════════════════════════════════════════════════
+
+echo ""
+echo "━━━ 22. IP rate limit ━━━"
+# Start a fresh gateway on port 4001 with ip_rate_limit: 3
+IP_PORT=4001
+IP_CONFIG=$(mktemp /tmp/gateway-ip-XXXXXX.yml)
+cat > "$IP_CONFIG" <<'YMLEOF'
+transport:
+  type: http
+  addr: "0.0.0.0:4001"
+  upstream: "http://localhost:3000/mcp"
+  session_ttl_secs: 3600
+agents:
+  cursor:
+    allowed_tools: [echo]
+    rate_limit: 100
+rules:
+  ip_rate_limit: 3
+YMLEOF
+./target/debug/gateway "$IP_CONFIG" 2>/dev/null &
+IP_GW_PID=$!
+wait_for_port $IP_PORT
+
+IP_INIT=$(curl -s -D /tmp/ip-headers.txt -X POST \
+    -H "Content-Type: application/json" \
+    -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"cursor","version":"1.0.0"}}}' \
+    "http://localhost:${IP_PORT}/mcp" 2>/dev/null)
+IP_SID=$(grep -i "mcp-session-id:" /tmp/ip-headers.txt | awk '{print $2}' | tr -d '\r\n')
+CALL='{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"echo","arguments":{"text":"hi"}}}'
+R1=$(curl -s -X POST -H "Content-Type: application/json" -H "Mcp-Session-Id: $IP_SID" -d "$CALL" "http://localhost:${IP_PORT}/mcp")
+R2=$(curl -s -X POST -H "Content-Type: application/json" -H "Mcp-Session-Id: $IP_SID" -d "$CALL" "http://localhost:${IP_PORT}/mcp")
+R3=$(curl -s -X POST -H "Content-Type: application/json" -H "Mcp-Session-Id: $IP_SID" -d "$CALL" "http://localhost:${IP_PORT}/mcp")
+R4=$(curl -s -X POST -H "Content-Type: application/json" -H "Mcp-Session-Id: $IP_SID" -d "$CALL" "http://localhost:${IP_PORT}/mcp")
+check "first 3 calls within IP limit" "$R1$R2$R3" "hi"
+check "4th call exceeds IP rate limit" "$R4" "IP rate limit"
+
+kill "$IP_GW_PID" 2>/dev/null || true
+rm -f "$IP_CONFIG"
+
 # ══ NEW: circuit breaker (last — kills dummy server) ══════════════════════════
 
 echo ""

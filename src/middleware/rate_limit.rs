@@ -14,6 +14,8 @@ pub struct RateLimitMiddleware {
     counts: Arc<Mutex<HashMap<String, Vec<Instant>>>>,
     /// Per-(agent, tool) sliding window counters for tool_rate_limits.
     tool_counts: Arc<Mutex<HashMap<(String, String), Vec<Instant>>>>,
+    /// Per-IP sliding window counters (HTTP mode). Keyed by client IP string.
+    ip_counts: Arc<Mutex<HashMap<String, Vec<Instant>>>>,
 }
 
 impl RateLimitMiddleware {
@@ -22,6 +24,7 @@ impl RateLimitMiddleware {
             config,
             counts: Arc::new(Mutex::new(HashMap::new())),
             tool_counts: Arc::new(Mutex::new(HashMap::new())),
+            ip_counts: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 }
@@ -37,7 +40,7 @@ impl Middleware for RateLimitMiddleware {
             return Decision::Allow;
         }
 
-        let (global_limit, tool_limit) = {
+        let (global_limit, tool_limit, ip_limit) = {
             let cfg = self.config.borrow();
             let Some(policy) = cfg.agents.get(&ctx.agent_id) else {
                 return Decision::Allow; // unknown agents are blocked by AuthMiddleware
@@ -46,11 +49,24 @@ impl Middleware for RateLimitMiddleware {
                 .tool_name
                 .as_ref()
                 .and_then(|t| policy.tool_rate_limits.get(t).copied());
-            (policy.rate_limit, tool_limit)
+            (policy.rate_limit, tool_limit, cfg.ip_rate_limit)
         };
 
         let now = Instant::now();
         let window = Duration::from_secs(60);
+
+        // ── IP rate limit (checked first — cheapest rejection) ─────────────────
+        if let (Some(limit), Some(ip)) = (ip_limit, ctx.client_ip.as_ref()) {
+            let mut ip_counts = self.ip_counts.lock().await;
+            let ts = ip_counts.entry(ip.clone()).or_default();
+            ts.retain(|t| now.duration_since(*t) < window);
+            if ts.len() >= limit {
+                return Decision::Block {
+                    reason: format!("IP rate limit exceeded ({limit}/min)"),
+                };
+            }
+            ts.push(now);
+        }
 
         // ── Global agent rate limit ────────────────────────────────────────────
         {

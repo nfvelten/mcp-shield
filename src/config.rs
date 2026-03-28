@@ -146,6 +146,9 @@ fn default_rate_limit() -> usize {
 pub struct Rules {
     #[serde(default)]
     pub block_patterns: Vec<String>,
+    /// Maximum requests per minute from a single IP address (HTTP mode only).
+    /// Applies before per-agent limits. None = no IP-based limit.
+    pub ip_rate_limit: Option<usize>,
 }
 
 impl Config {

@@ -66,7 +66,7 @@ async fn main() -> anyhow::Result<()> {
         .map(|p| Regex::new(p).unwrap_or_else(|_| panic!("invalid regex: {p}")))
         .collect();
 
-    let live = Arc::new(LiveConfig::new(config.agents, block_patterns));
+    let live = Arc::new(LiveConfig::new(config.agents, block_patterns, config.rules.ip_rate_limit));
     let (config_tx, config_rx) = watch::channel(live);
 
     // ── Hot-reload — SIGUSR1 for immediate reload, polls every 30s as fallback ──
@@ -209,7 +209,7 @@ fn do_reload(
                         .ok()
                 })
                 .collect();
-            let new_live = Arc::new(LiveConfig::new(new_cfg.agents, new_patterns));
+            let new_live = Arc::new(LiveConfig::new(new_cfg.agents, new_patterns, new_cfg.rules.ip_rate_limit));
             if tx.send(new_live).is_ok() {
                 tracing::info!(path = reload_path, "config reloaded");
             }

@@ -12,6 +12,8 @@ pub struct McpContext {
     pub method: String,
     pub tool_name: Option<String>,
     pub arguments: Option<Value>,
+    /// Client IP address — present in HTTP mode, None in stdio mode.
+    pub client_ip: Option<String>,
 }
 
 /// Middleware decision: continue or block with a reason.
