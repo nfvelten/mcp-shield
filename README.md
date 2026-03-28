@@ -14,23 +14,28 @@ Agent (Cursor, Claude, etc.)
 
 ## What it does
 
-- **Auth** — each agent gets an explicit allowlist or denylist of tools; optional pre-shared API key
+- **Auth** — each agent gets an explicit allowlist or denylist of tools; optional pre-shared API key or JWT/OIDC
 - **tools/list filtering** — agents only see the tools they are allowed to call
-- **Rate limiting** — per-agent sliding window (calls/min) + per-tool rate limits
+- **Rate limiting** — per-agent sliding window (calls/min) + per-tool limits + per-IP limit; standard `X-RateLimit-*` headers on every response
 - **Payload filtering** — block requests whose arguments match sensitive patterns (passwords, API keys, tokens)
 - **Response filtering** — block upstream responses that contain sensitive patterns before they reach the agent
 - **Audit log** — every request recorded; fan-out to multiple backends simultaneously (SQLite, webhook, stdout)
 - **Multiple upstreams** — route different agents to different MCP servers
 - **Circuit breaker** — upstream failures open the circuit; automatic half-open probe after recovery timeout
-- **Config hot-reload** — agent policies and block patterns reload from disk every 5 seconds without restart
+- **Config hot-reload** — reload on `SIGUSR1` or automatically every 30 seconds without restart
 - **Metrics** — Prometheus-compatible `/metrics` endpoint
+- **Dashboard** — `/dashboard` audit viewer with per-agent filtering
 - **TLS** — optional HTTPS with certificate and key files
 - **SSE streaming** — `GET /mcp` proxies the upstream SSE stream with response filtering
 - **Transport agnostic** — works over HTTP+SSE or stdio; same config, same policies
 
 ## Installation
 
-Requires Rust 1.85+.
+```sh
+cargo install mcp-gateway
+```
+
+Or build from source (requires Rust 1.85+):
 
 ```sh
 git clone https://github.com/nfvelten/mcp-gateway
@@ -41,6 +46,12 @@ cargo build --release
 Binaries will be at `target/release/gateway` and `target/release/audit`.
 
 Or download a pre-built binary from the [releases page](https://github.com/nfvelten/mcp-gateway/releases).
+
+### Docker
+
+```sh
+docker-compose up
+```
 
 ## Configuration
 
@@ -55,6 +66,8 @@ transport:
   # tls:                   # optional — enables HTTPS
   #   cert: "cert.pem"
   #   key:  "key.pem"
+
+admin_token: "admin-secret"   # optional — protects /metrics and /dashboard
 
 audit:
   type: sqlite
@@ -86,6 +99,7 @@ rules:
     - "secret"
     - "Bearer "
     - "private_key"
+  # ip_rate_limit: 100      # optional — max calls/min per client IP
 ```
 
 ### `transport`
@@ -99,6 +113,34 @@ rules:
 | `tls.cert` | (HTTP only) path to PEM certificate file. Enables HTTPS when set. |
 | `tls.key` | (HTTP only) path to PEM private key file |
 | `server` | (stdio only) command to spawn the MCP server, as a list |
+
+### `admin_token`
+
+Optional top-level field. When set, `/metrics` and `/dashboard` require an `Authorization: Bearer <token>` header. Without the header the endpoints return `403`.
+
+```yaml
+admin_token: "your-admin-secret"
+```
+
+### `auth` (JWT / OIDC)
+
+Optional. When set, every `initialize` request must carry a valid JWT in the `Authorization: Bearer` header. The gateway rejects tokens without an `exp` claim.
+
+```yaml
+# HMAC (HS256) — shared secret
+auth:
+  hmac_secret: "your-signing-secret"
+  issuer: "https://auth.example.com"      # optional — validated if set
+  audience: "mcp-gateway"                 # optional — validated if set
+
+# JWKS (RS256 / OIDC) — public key endpoint
+auth:
+  jwks_url: "https://auth.example.com/.well-known/jwks.json"
+  issuer: "https://auth.example.com"
+  audience: "mcp-gateway"
+```
+
+`hmac_secret` and `jwks_url` are mutually exclusive. JWKS keys are fetched on startup and cached; the fetch has a 5-second timeout.
 
 ### `upstreams`
 
@@ -151,8 +193,9 @@ agents:
 | Field | Description |
 |---|---|
 | `block_patterns` | List of regex patterns. Any `tools/call` whose arguments **or upstream response** matches is blocked. |
+| `ip_rate_limit` | Max `tools/call` requests per minute per client IP. Applied before per-agent limits. Optional. |
 
-Config changes to `agents` and `rules` are picked up automatically every 5 seconds — no restart required.
+Config changes to `agents` and `rules` are picked up automatically — no restart required.
 
 ### `audit` / `audits`
 
@@ -222,6 +265,28 @@ curl -X DELETE http://localhost:4000/mcp -H "Mcp-Session-Id: <id>"
 # 204 No Content on success, 404 if the session is already gone
 ```
 
+### Rate-limit headers
+
+Every `tools/call` response includes standard rate-limit headers:
+
+```
+X-RateLimit-Limit: 60
+X-RateLimit-Remaining: 57
+X-RateLimit-Reset: 42
+```
+
+When the limit is exceeded, the response also includes `Retry-After`:
+
+```
+HTTP/1.1 200 OK
+X-RateLimit-Limit: 60
+X-RateLimit-Remaining: 0
+X-RateLimit-Reset: 38
+Retry-After: 38
+```
+
+`X-RateLimit-Reset` and `Retry-After` are in seconds until the oldest request in the window ages out (≤ 60).
+
 ### SSE streaming
 
 Once a session is established, open a server-sent event stream to receive server-pushed notifications:
@@ -277,6 +342,8 @@ The HTTP gateway exposes a Prometheus-compatible metrics endpoint:
 
 ```sh
 curl http://localhost:4000/metrics
+# With admin_token:
+curl http://localhost:4000/metrics -H "Authorization: Bearer admin-secret"
 ```
 
 ```
@@ -285,6 +352,44 @@ curl http://localhost:4000/metrics
 mcp_gateway_requests_total{agent="cursor",outcome="allowed"} 12
 mcp_gateway_requests_total{agent="cursor",outcome="blocked"} 3
 mcp_gateway_requests_total{agent="claude-code",outcome="forwarded"} 8
+```
+
+## Dashboard
+
+The HTTP gateway exposes an audit dashboard at `/dashboard`:
+
+```sh
+open http://localhost:4000/dashboard
+# With admin_token:
+curl http://localhost:4000/dashboard -H "Authorization: Bearer admin-secret"
+```
+
+Supports filtering by agent via query parameter:
+
+```sh
+curl "http://localhost:4000/dashboard?agent=cursor"
+```
+
+## Config hot-reload
+
+Agent policies and block patterns reload from disk every 30 seconds automatically, or immediately on `SIGUSR1`:
+
+```sh
+kill -USR1 $(pidof gateway)
+```
+
+No restart required. In-flight requests are not affected.
+
+## Logging
+
+Control log format and level via environment variables:
+
+```sh
+# Structured JSON (production / log aggregators)
+LOG_FORMAT=json ./gateway gateway.yml
+
+# Adjust log level (default: info)
+LOG_LEVEL=debug ./gateway gateway.yml
 ```
 
 ## Audit CLI
@@ -347,18 +452,17 @@ Flags:
 
 Each middleware is a trait object — new checks can be added without touching the gateway core. Transport, upstream, and audit backend are also trait objects, swappable via config.
 
-## Integration tests
-
-Requires Node.js (for `@modelcontextprotocol/server-filesystem`):
+## Tests
 
 ```sh
-# stdio mode — tests against real filesystem MCP server
+# Unit tests (85 tests)
+cargo test
+
+# HTTP integration tests (35 checks)
+bash test-http.sh
+
+# stdio integration tests — requires Node.js
 mkdir -p /tmp/mcp-test && echo "hello" > /tmp/mcp-test/hello.txt
 cargo build
 bash test-stdio.sh
-
-# HTTP mode — tests against the built-in dummy server
-bash test-http.sh
 ```
-
-Expected: 10/10 stdio, 13/13 HTTP.
