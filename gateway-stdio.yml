@@ -19,6 +19,12 @@ agents:
       - delete_file
     rate_limit: 60
 
+  # Tight rate limit — for rate limit exhaustion test
+  rate-test:
+    allowed_tools:
+      - read_file
+    rate_limit: 2
+
 rules:
   block_patterns:
     - "password"

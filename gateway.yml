@@ -27,6 +27,33 @@ agents:
       - delete_database
     rate_limit: 20
 
+  # Pre-shared API key — for api_key auth tests
+  secured-agent:
+    allowed_tools:
+      - echo
+    rate_limit: 10
+    api_key: "test-key-123"
+
+  # Low rate limit — for global rate limit exhaustion test
+  rate-test:
+    allowed_tools:
+      - echo
+    rate_limit: 3
+
+  # Per-tool cap — for tool_rate_limits test
+  tool-rate-test:
+    allowed_tools:
+      - echo
+    rate_limit: 10
+    tool_rate_limits:
+      echo: 2
+
+  # Can call secret_dump — for response filtering test
+  secret-dumper:
+    allowed_tools:
+      - secret_dump
+    rate_limit: 10
+
 rules:
   block_patterns:
     - "password"

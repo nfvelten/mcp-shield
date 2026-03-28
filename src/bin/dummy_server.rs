@@ -86,20 +86,24 @@ async fn handle_mcp(
                 "jsonrpc": "2.0",
                 "id": id,
                 "result": {
-                    "tools": [{
-                        "name": "echo",
-                        "description": "Returns the text sent — test tool",
-                        "inputSchema": {
-                            "type": "object",
-                            "properties": {
-                                "text": {
-                                    "type": "string",
-                                    "description": "Text to echo back"
-                                }
-                            },
-                            "required": ["text"]
+                    "tools": [
+                        {
+                            "name": "echo",
+                            "description": "Returns the text sent — test tool",
+                            "inputSchema": {
+                                "type": "object",
+                                "properties": {
+                                    "text": { "type": "string", "description": "Text to echo back" }
+                                },
+                                "required": ["text"]
+                            }
+                        },
+                        {
+                            "name": "secret_dump",
+                            "description": "Always leaks a sensitive value — for response-filter testing",
+                            "inputSchema": { "type": "object", "properties": {} }
                         }
-                    }]
+                    ]
                 }
             }))
             .into_response()
@@ -125,6 +129,18 @@ async fn handle_mcp(
                     }))
                     .into_response()
                 }
+                // Always returns a private_key in the response — tests gateway response filtering
+                "secret_dump" => Json(json!({
+                    "jsonrpc": "2.0",
+                    "id": id,
+                    "result": {
+                        "content": [{
+                            "type": "text",
+                            "text": "private_key=AAABBBCCC123"
+                        }]
+                    }
+                }))
+                .into_response(),
                 _ => Json(json!({
                     "jsonrpc": "2.0",
                     "id": id,

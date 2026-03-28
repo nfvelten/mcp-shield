@@ -9,8 +9,7 @@ PASS=0
 FAIL=0
 
 run_session() {
-  local label="$1"
-  local input="$2"
+  local input="$1"
   "$BINARY" "$CONFIG" <<< "$input" 2>/dev/null
 }
 
@@ -43,9 +42,11 @@ check_absent() {
   fi
 }
 
+# ══ EXISTING SCENARIOS ════════════════════════════════════════════════════════
+
 echo ""
 echo "━━━ 1. Handshake + tools/list (cursor sees only read_file and list_directory) ━━━"
-OUT=$(run_session "tools/list" "$(printf '%s\n%s\n%s\n' \
+OUT=$(run_session "$(printf '%s\n%s\n%s\n' \
   '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"cursor","version":"1.0.0"}}}' \
   '{"jsonrpc":"2.0","method":"notifications/initialized"}' \
   '{"jsonrpc":"2.0","id":2,"method":"tools/list"}')")
@@ -56,7 +57,7 @@ check_absent "tools/list does not contain write_file" "$OUT" '"write_file"'
 
 echo ""
 echo "━━━ 2. read_file allowed (cursor reads hello.txt) ━━━"
-OUT=$(run_session "read_file" "$(printf '%s\n%s\n%s\n' \
+OUT=$(run_session "$(printf '%s\n%s\n%s\n' \
   '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"cursor","version":"1.0.0"}}}' \
   '{"jsonrpc":"2.0","method":"notifications/initialized"}' \
   '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"read_file","arguments":{"path":"/tmp/mcp-test/hello.txt"}}}')")
@@ -64,7 +65,7 @@ check "read_file returns file contents" "$OUT" "conteudo do arquivo"
 
 echo ""
 echo "━━━ 3. write_file blocked (cursor does not have it in allowlist) ━━━"
-OUT=$(run_session "write_file blocked" "$(printf '%s\n%s\n%s\n' \
+OUT=$(run_session "$(printf '%s\n%s\n%s\n' \
   '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"cursor","version":"1.0.0"}}}' \
   '{"jsonrpc":"2.0","method":"notifications/initialized"}' \
   '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"write_file","arguments":{"path":"/tmp/mcp-test/pwned.txt","content":"hacked"}}}')")
@@ -73,7 +74,7 @@ check "file was NOT created" "$([ ! -f /tmp/mcp-test/pwned.txt ] && echo 'does n
 
 echo ""
 echo "━━━ 4. Sensitive payload blocked ━━━"
-OUT=$(run_session "sensitive payload" "$(printf '%s\n%s\n%s\n' \
+OUT=$(run_session "$(printf '%s\n%s\n%s\n' \
   '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"cursor","version":"1.0.0"}}}' \
   '{"jsonrpc":"2.0","method":"notifications/initialized"}' \
   '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"read_file","arguments":{"path":"/tmp/mcp-test/secret=abc"}}}')")
@@ -81,14 +82,14 @@ check "sensitive payload blocked" "$OUT" "blocked"
 
 echo ""
 echo "━━━ 5. Unknown agent blocked ━━━"
-OUT=$(run_session "unknown agent" "$(printf '%s\n%s\n' \
+OUT=$(run_session "$(printf '%s\n%s\n' \
   '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"malicious-agent","version":"1.0.0"}}}' \
   '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"read_file","arguments":{"path":"/tmp/mcp-test/hello.txt"}}}')")
 check "unknown agent blocked" "$OUT" "unknown"
 
 echo ""
 echo "━━━ 6. claude-code reads file (allowed) ━━━"
-OUT=$(run_session "claude-code read" "$(printf '%s\n%s\n%s\n' \
+OUT=$(run_session "$(printf '%s\n%s\n%s\n' \
   '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"claude-code","version":"1.0.0"}}}' \
   '{"jsonrpc":"2.0","method":"notifications/initialized"}' \
   '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"read_file","arguments":{"path":"/tmp/mcp-test/hello.txt"}}}')")
@@ -96,11 +97,44 @@ check "claude-code reads file" "$OUT" "conteudo do arquivo"
 
 echo ""
 echo "━━━ 7. claude-code tries write_file (explicitly denied) ━━━"
-OUT=$(run_session "claude-code write blocked" "$(printf '%s\n%s\n%s\n' \
+OUT=$(run_session "$(printf '%s\n%s\n%s\n' \
   '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"claude-code","version":"1.0.0"}}}' \
   '{"jsonrpc":"2.0","method":"notifications/initialized"}' \
   '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"write_file","arguments":{"path":"/tmp/mcp-test/pwned.txt","content":"hacked"}}}')")
 check "claude-code write blocked" "$OUT" "blocked"
+
+# ══ NEW SCENARIOS ══════════════════════════════════════════════════════════════
+
+echo ""
+echo "━━━ 8. claude-code tools/list — denylist hides write_file and delete_file ━━━"
+OUT=$(run_session "$(printf '%s\n%s\n%s\n' \
+  '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"claude-code","version":"1.0.0"}}}' \
+  '{"jsonrpc":"2.0","method":"notifications/initialized"}' \
+  '{"jsonrpc":"2.0","id":2,"method":"tools/list"}')")
+check_absent "write_file absent in claude-code tools/list"  "$OUT" '"write_file"'
+check_absent "delete_file absent in claude-code tools/list" "$OUT" '"delete_file"'
+check        "read_file visible to claude-code"             "$OUT" '"read_file"'
+
+echo ""
+echo "━━━ 9. rate limit exhaustion (rate-test: 2/min, 3 calls in same session) ━━━"
+# All 3 calls sent in a single session — the gateway process is shared,
+# so the sliding-window counter accumulates across all three calls.
+OUT=$(run_session "$(printf '%s\n%s\n%s\n%s\n%s\n' \
+  '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"rate-test","version":"1.0.0"}}}' \
+  '{"jsonrpc":"2.0","method":"notifications/initialized"}' \
+  '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"read_file","arguments":{"path":"/tmp/mcp-test/hello.txt"}}}' \
+  '{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"read_file","arguments":{"path":"/tmp/mcp-test/hello.txt"}}}' \
+  '{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"read_file","arguments":{"path":"/tmp/mcp-test/hello.txt"}}}')")
+check        "calls within limit succeed"    "$OUT" "conteudo do arquivo"
+check        "third call blocked (rate limit)" "$OUT" "rate limit"
+
+echo ""
+echo "━━━ 10. list_directory allowed for claude-code (not in denylist) ━━━"
+OUT=$(run_session "$(printf '%s\n%s\n%s\n' \
+  '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"claude-code","version":"1.0.0"}}}' \
+  '{"jsonrpc":"2.0","method":"notifications/initialized"}' \
+  '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"list_directory","arguments":{"path":"/tmp/mcp-test"}}}')")
+check "list_directory allowed for claude-code" "$OUT" "hello.txt"
 
 echo ""
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
