@@ -1,5 +1,5 @@
 use mcp_gateway::{
-    audit::{sqlite::SqliteAudit, stdout::StdoutAudit, AuditLog},
+    audit::{sqlite::SqliteAudit, stdout::StdoutAudit, webhook::WebhookAudit, AuditLog},
     config::{AuditConfig, Config, TransportConfig},
     gateway::McpGateway,
     metrics::GatewayMetrics,
@@ -24,6 +24,10 @@ async fn main() -> anyhow::Result<()> {
         AuditConfig::Sqlite { path } => {
             eprintln!("[GATEWAY] SQLite audit at {path}");
             Arc::new(SqliteAudit::new(path)?)
+        }
+        AuditConfig::Webhook { url, token } => {
+            eprintln!("[GATEWAY] Webhook audit to {url}");
+            Arc::new(WebhookAudit::new(url, token.clone()))
         }
     };
 

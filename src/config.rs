@@ -76,6 +76,11 @@ pub enum AuditConfig {
         #[serde(default = "default_db_path")]
         path: String,
     },
+    Webhook {
+        url: String,
+        /// Optional Bearer token sent in the Authorization header.
+        token: Option<String>,
+    },
 }
 
 impl Default for AuditConfig {

@@ -139,6 +139,29 @@ Agents not listed in the config are blocked entirely.
 |---|---|
 | `type: stdout` | Print entries to stdout (default) |
 | `type: sqlite` | Persist to a SQLite database at `path` |
+| `type: webhook` | POST each entry as JSON to `url` |
+
+Webhook config:
+
+```yaml
+audit:
+  type: webhook
+  url: "https://hooks.example.com/mcp-audit"
+  token: "secret"   # optional — sent as Bearer token in Authorization header
+```
+
+Payload sent on each request:
+
+```json
+{
+  "ts": 1711584000,
+  "agent_id": "cursor",
+  "method": "tools/call",
+  "tool": "write_file",
+  "outcome": "blocked",
+  "reason": "tool 'write_file' not in allowlist"
+}
+```
 
 ## Usage
 
@@ -153,6 +176,13 @@ Start the gateway:
 Agents connect to `http://localhost:4000/mcp`. The gateway forwards allowed requests to the upstream MCP server.
 
 Session management follows the MCP spec: the gateway assigns a `Mcp-Session-Id` on `initialize` and uses it to identify the agent on subsequent requests. Requests with a missing or expired session ID receive `404`.
+
+To explicitly end a session, send `DELETE /mcp` with the session header:
+
+```sh
+curl -X DELETE http://localhost:4000/mcp -H "Mcp-Session-Id: <id>"
+# 204 No Content on success, 404 if the session is already gone
+```
 
 ### HTTPS mode
 

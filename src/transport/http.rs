@@ -5,7 +5,7 @@ use axum::{
     extract::State,
     http::{HeaderMap, HeaderValue, StatusCode},
     response::IntoResponse,
-    routing::{get, post},
+    routing::{delete, get, post},
     Json, Router,
 };
 use serde_json::Value;
@@ -43,6 +43,11 @@ impl SessionStore {
             let expired = Instant::now().duration_since(*created).as_secs() >= self.ttl_secs;
             if expired { None } else { Some(agent_id.clone()) }
         })
+    }
+
+    async fn invalidate(&self, session_id: &str) -> bool {
+        let mut sessions = self.sessions.lock().await;
+        sessions.remove(session_id).is_some()
     }
 }
 
@@ -85,6 +90,7 @@ impl Transport for HttpTransport {
 
         let app = Router::new()
             .route("/mcp", post(handle_mcp))
+            .route("/mcp", delete(handle_delete_session))
             .route("/metrics", get(handle_metrics))
             .with_state(state);
 
@@ -186,6 +192,22 @@ async fn handle_mcp(
             None => StatusCode::ACCEPTED.into_response(),
         },
         Err(status) => status.into_response(),
+    }
+}
+
+async fn handle_delete_session(
+    State(state): State<Arc<HttpState>>,
+    headers: HeaderMap,
+) -> impl IntoResponse {
+    let sid = match headers.get("mcp-session-id").and_then(|v| v.to_str().ok()) {
+        Some(s) => s.to_string(),
+        None => return StatusCode::BAD_REQUEST.into_response(),
+    };
+    if state.sessions.invalidate(&sid).await {
+        eprintln!("[SESSION] invalidated id={sid}");
+        StatusCode::NO_CONTENT.into_response()
+    } else {
+        StatusCode::NOT_FOUND.into_response()
     }
 }
 
