@@ -1,0 +1,27 @@
+transport:
+  type: http
+  addr: "0.0.0.0:4000"
+  upstream: "http://localhost:3000"
+
+audit:
+  type: sqlite
+  path: "gateway-audit.db"
+
+agents:
+  cursor:
+    allowed_tools:
+      - echo
+    rate_limit: 5
+
+  claude-code:
+    denied_tools:
+      - delete_database
+    rate_limit: 20
+
+rules:
+  block_patterns:
+    - "password"
+    - "api_key"
+    - "secret"
+    - "Bearer "
+    - "private_key"

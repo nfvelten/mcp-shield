@@ -1,0 +1,28 @@
+transport:
+  type: stdio
+  server: ["npx", "-y", "@modelcontextprotocol/server-filesystem", "/tmp/mcp-test"]
+
+audit:
+  type: sqlite
+  path: "gateway-audit-stdio.db"
+
+agents:
+  cursor:
+    allowed_tools:
+      - read_file
+      - list_directory
+    rate_limit: 30
+
+  claude-code:
+    denied_tools:
+      - write_file
+      - delete_file
+    rate_limit: 60
+
+rules:
+  block_patterns:
+    - "password"
+    - "api_key"
+    - "secret"
+    - "Bearer "
+    - "private_key"
