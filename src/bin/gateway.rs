@@ -39,13 +39,21 @@ async fn main() -> anyhow::Result<()> {
 
     // ── Audit log — pluggable, fan-out to all configured backends ──────────────
     let mut audit_backends: Vec<Arc<dyn AuditLog>> = Vec::new();
+    // Track the first SQLite path for the /dashboard endpoint
+    let mut sqlite_db_path: Option<String> = None;
 
     // New-style `audits:` list
     for backend_cfg in &config.audits {
+        if let AuditConfig::Sqlite { path, .. } = backend_cfg {
+            if sqlite_db_path.is_none() { sqlite_db_path = Some(path.clone()); }
+        }
         audit_backends.push(build_audit_backend(backend_cfg)?);
     }
     // Legacy `audit:` single backend (backward compat)
     if let Some(backend_cfg) = &config.audit {
+        if let AuditConfig::Sqlite { path, .. } = backend_cfg {
+            if sqlite_db_path.is_none() { sqlite_db_path = Some(path.clone()); }
+        }
         audit_backends.push(build_audit_backend(backend_cfg)?);
     }
     // Default: stdout if nothing configured
@@ -167,7 +175,7 @@ async fn main() -> anyhow::Result<()> {
                 Arc::clone(&metrics),
                 config_rx.clone(),
             ));
-            HttpTransport::new(addr, session_ttl_secs, tls, metrics, config_rx, jwt)
+            HttpTransport::new(addr, session_ttl_secs, tls, metrics, config_rx, jwt, sqlite_db_path)
                 .serve(gateway)
                 .await?;
         }

@@ -67,6 +67,9 @@ pub struct HttpTransport {
     metrics: Arc<GatewayMetrics>,
     config: watch::Receiver<Arc<LiveConfig>>,
     jwt: Option<Arc<JwtValidator>>,
+    /// Path to the SQLite audit DB for the /dashboard endpoint.
+    /// None when audit is not SQLite or dashboard is disabled.
+    audit_db: Option<String>,
 }
 
 impl HttpTransport {
@@ -77,8 +80,9 @@ impl HttpTransport {
         metrics: Arc<GatewayMetrics>,
         config: watch::Receiver<Arc<LiveConfig>>,
         jwt: Option<Arc<JwtValidator>>,
+        audit_db: Option<String>,
     ) -> Self {
-        Self { addr: addr.into(), session_ttl_secs, tls, metrics, config, jwt }
+        Self { addr: addr.into(), session_ttl_secs, tls, metrics, config, jwt, audit_db }
     }
 }
 
@@ -89,6 +93,7 @@ struct HttpState {
     config: watch::Receiver<Arc<LiveConfig>>,
     /// Optional JWT validator — present when `auth.jwt` is configured.
     jwt: Option<Arc<JwtValidator>>,
+    audit_db: Option<String>,
 }
 
 const MAX_AGENT_ID_LEN: usize = 128;
@@ -102,6 +107,7 @@ impl Transport for HttpTransport {
             metrics: Arc::clone(&self.metrics),
             config: self.config.clone(),
             jwt: self.jwt.clone(),
+            audit_db: self.audit_db.clone(),
         });
 
         let app = Router::new()
@@ -110,6 +116,7 @@ impl Transport for HttpTransport {
             .route("/mcp", delete(handle_delete_session))
             .route("/metrics", get(handle_metrics))
             .route("/health", get(handle_health))
+            .route("/dashboard", get(handle_dashboard))
             .with_state(state);
 
         if let Some(tls) = &self.tls {
@@ -307,6 +314,154 @@ async fn handle_metrics(State(state): State<Arc<HttpState>>) -> impl IntoRespons
         )],
         body,
     )
+}
+
+// ── Dashboard ─────────────────────────────────────────────────────────────────
+
+async fn handle_dashboard(State(state): State<Arc<HttpState>>) -> impl IntoResponse {
+    use axum::http::header::CONTENT_TYPE;
+
+    let Some(db_path) = &state.audit_db else {
+        return (
+            StatusCode::NOT_FOUND,
+            [(CONTENT_TYPE, "text/plain")],
+            "dashboard requires a sqlite audit backend".to_string(),
+        )
+            .into_response();
+    };
+
+    let db_path = db_path.clone();
+    let rows: Vec<(i64, String, String, Option<String>, String, Option<String>)> =
+        tokio::task::spawn_blocking(move || {
+            let conn = rusqlite::Connection::open(&db_path)?;
+            let mut stmt = conn.prepare(
+                "SELECT ts, agent_id, method, tool, outcome, reason \
+                 FROM audit_log ORDER BY id DESC LIMIT 200",
+            )?;
+            let rows = stmt
+                .query_map([], |row| {
+                    Ok((
+                        row.get::<_, i64>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, Option<String>>(3)?,
+                        row.get::<_, String>(4)?,
+                        row.get::<_, Option<String>>(5)?,
+                    ))
+                })?
+                .filter_map(|r| r.ok())
+                .collect();
+            anyhow::Ok(rows)
+        })
+        .await
+        .ok()
+        .and_then(|r| r.ok())
+        .unwrap_or_default();
+
+    let mut table_rows = String::new();
+    for (ts, agent, method, tool, outcome, reason) in &rows {
+        let dt = chrono_ts(*ts);
+        let badge = match outcome.as_str() {
+            "allowed" => r#"<span class="badge allowed">allowed</span>"#,
+            "blocked" => r#"<span class="badge blocked">blocked</span>"#,
+            _ => r#"<span class="badge forwarded">forwarded</span>"#,
+        };
+        let tool_str = html_escape(tool.as_deref().unwrap_or("—"));
+        let reason_str = html_escape(reason.as_deref().unwrap_or(""));
+        table_rows.push_str(&format!(
+            "<tr><td>{dt}</td><td>{}</td><td>{}</td><td>{tool_str}</td><td>{badge}</td><td>{reason_str}</td></tr>\n",
+            html_escape(agent),
+            html_escape(method),
+        ));
+    }
+
+    let total = rows.len();
+    let html = format!(
+        r#"<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>mcp-gateway — audit dashboard</title>
+<style>
+  body {{ font-family: system-ui, sans-serif; margin: 0; background: #f5f5f5; color: #222; }}
+  header {{ background: #1a1a2e; color: #fff; padding: 1rem 2rem; display: flex; align-items: center; gap: 1rem; }}
+  header h1 {{ margin: 0; font-size: 1.2rem; font-weight: 600; }}
+  header span {{ font-size: .85rem; opacity: .7; }}
+  main {{ padding: 1.5rem 2rem; }}
+  table {{ width: 100%; border-collapse: collapse; background: #fff; border-radius: 8px; overflow: hidden; box-shadow: 0 1px 4px rgba(0,0,0,.1); }}
+  th {{ background: #eee; text-align: left; padding: .6rem 1rem; font-size: .8rem; text-transform: uppercase; letter-spacing: .05em; }}
+  td {{ padding: .55rem 1rem; border-top: 1px solid #eee; font-size: .88rem; }}
+  tr:hover td {{ background: #fafafa; }}
+  .badge {{ display: inline-block; padding: .15rem .5rem; border-radius: 4px; font-size: .75rem; font-weight: 600; }}
+  .allowed {{ background: #d4edda; color: #155724; }}
+  .blocked {{ background: #f8d7da; color: #721c24; }}
+  .forwarded {{ background: #cce5ff; color: #004085; }}
+  .meta {{ margin-bottom: 1rem; font-size: .85rem; color: #666; }}
+</style>
+</head>
+<body>
+<header>
+  <h1>mcp-gateway</h1>
+  <span>audit dashboard — last {total} entries</span>
+</header>
+<main>
+<p class="meta">Showing the most recent {total} audit entries (newest first). Refresh the page for live data.</p>
+<table>
+<thead><tr><th>Time</th><th>Agent</th><th>Method</th><th>Tool</th><th>Outcome</th><th>Reason</th></tr></thead>
+<tbody>
+{table_rows}</tbody>
+</table>
+</main>
+</body>
+</html>"#
+    );
+
+    (StatusCode::OK, [(CONTENT_TYPE, "text/html; charset=utf-8")], html).into_response()
+}
+
+fn chrono_ts(ts: i64) -> String {
+    use std::time::{Duration, UNIX_EPOCH};
+    let d = UNIX_EPOCH + Duration::from_secs(ts as u64);
+    let secs = ts % 86400;
+    let h = (secs / 3600) % 24;
+    let m = (secs % 3600) / 60;
+    let s = secs % 60;
+    // Days since epoch → approximate date (good enough for display)
+    let days = ts / 86400;
+    let epoch_year = 1970i64;
+    let mut year = epoch_year;
+    let mut rem = days;
+    loop {
+        let dy = if is_leap(year) { 366 } else { 365 };
+        if rem < dy { break; }
+        rem -= dy;
+        year += 1;
+    }
+    let months = if is_leap(year) {
+        [31, 29, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31]
+    } else {
+        [31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31]
+    };
+    let mut month = 1i64;
+    for &days_in_month in &months {
+        if rem < days_in_month { break; }
+        rem -= days_in_month;
+        month += 1;
+    }
+    let day = rem + 1;
+    format!("{year}-{month:02}-{day:02} {h:02}:{m:02}:{s:02}")
+}
+
+fn is_leap(y: i64) -> bool {
+    (y % 4 == 0 && y % 100 != 0) || y % 400 == 0
+}
+
+fn html_escape(s: &str) -> String {
+    s.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
 }
 
 // ── SSE proxy ─────────────────────────────────────────────────────────────────
