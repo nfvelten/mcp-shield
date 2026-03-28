@@ -2,6 +2,7 @@ use super::Transport;
 use crate::{
     config::TlsConfig,
     gateway::McpGateway,
+    jwt::JwtValidator,
     live_config::LiveConfig,
     metrics::GatewayMetrics,
 };
@@ -65,6 +66,7 @@ pub struct HttpTransport {
     tls: Option<TlsConfig>,
     metrics: Arc<GatewayMetrics>,
     config: watch::Receiver<Arc<LiveConfig>>,
+    jwt: Option<Arc<JwtValidator>>,
 }
 
 impl HttpTransport {
@@ -74,8 +76,9 @@ impl HttpTransport {
         tls: Option<TlsConfig>,
         metrics: Arc<GatewayMetrics>,
         config: watch::Receiver<Arc<LiveConfig>>,
+        jwt: Option<Arc<JwtValidator>>,
     ) -> Self {
-        Self { addr: addr.into(), session_ttl_secs, tls, metrics, config }
+        Self { addr: addr.into(), session_ttl_secs, tls, metrics, config, jwt }
     }
 }
 
@@ -84,6 +87,8 @@ struct HttpState {
     sessions: Arc<SessionStore>,
     metrics: Arc<GatewayMetrics>,
     config: watch::Receiver<Arc<LiveConfig>>,
+    /// Optional JWT validator — present when `auth.jwt` is configured.
+    jwt: Option<Arc<JwtValidator>>,
 }
 
 const MAX_AGENT_ID_LEN: usize = 128;
@@ -96,6 +101,7 @@ impl Transport for HttpTransport {
             sessions: Arc::new(SessionStore::new(self.session_ttl_secs)),
             metrics: Arc::clone(&self.metrics),
             config: self.config.clone(),
+            jwt: self.jwt.clone(),
         });
 
         let app = Router::new()
@@ -183,6 +189,38 @@ async fn handle_mcp(
 
         if claimed_name.len() > MAX_AGENT_ID_LEN {
             return StatusCode::BAD_REQUEST.into_response();
+        }
+
+        // JWT auth: if a JwtValidator is configured and the request carries
+        // Authorization: Bearer <token>, validate it and use the token's claim
+        // as the agent identity. api_key and clientInfo.name are both ignored.
+        if let Some(validator) = &state.jwt {
+            if let Some(bearer) = headers
+                .get("authorization")
+                .and_then(|v| v.to_str().ok())
+                .and_then(|v| v.strip_prefix("Bearer "))
+            {
+                match validator.validate(bearer).await {
+                    Ok(agent_name) => {
+                        let session_id = state.sessions.create(agent_name.clone()).await;
+                        tracing::info!(session_id, agent = agent_name, "JWT session created");
+                        return match state.gateway.handle(&agent_name, msg, client_ip).await {
+                            Some(response) => {
+                                let mut res = Json(response).into_response();
+                                if let Ok(val) = HeaderValue::from_str(&session_id) {
+                                    res.headers_mut().insert("mcp-session-id", val);
+                                }
+                                res
+                            }
+                            None => StatusCode::ACCEPTED.into_response(),
+                        };
+                    }
+                    Err(e) => {
+                        tracing::warn!(error = %e, "JWT validation failed");
+                        return StatusCode::UNAUTHORIZED.into_response();
+                    }
+                }
+            }
         }
 
         // Key-based identity: if X-Api-Key is provided, the key IS the identity.

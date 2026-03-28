@@ -19,6 +19,8 @@ pub struct Config {
     /// Named upstream servers — agents can reference these by name via `upstream:` in their policy.
     #[serde(default)]
     pub upstreams: HashMap<String, String>,
+    /// Optional JWT / OIDC authentication configuration.
+    pub auth: Option<JwtConfig>,
 }
 
 // ── Transport ────────────────────────────────────────────────────────────────
@@ -141,6 +143,32 @@ pub struct AgentPolicy {
 fn default_rate_limit() -> usize {
     60
 }
+
+// ── JWT / OIDC ────────────────────────────────────────────────────────────────
+
+/// JWT authentication config — validated on every `initialize` that carries
+/// an `Authorization: Bearer <token>` header. The decoded claim identified by
+/// `agent_claim` is used as the agent identity.
+#[derive(Debug, Deserialize, Clone)]
+pub struct JwtConfig {
+    /// HMAC secret for HS256 tokens. Mutually exclusive with `jwks_url`.
+    pub secret: Option<String>,
+    /// JWKS endpoint URL for RS256/ES256 (OIDC). Mutually exclusive with `secret`.
+    pub jwks_url: Option<String>,
+    /// Required `iss` claim. Token is rejected if the issuer doesn't match.
+    pub issuer: Option<String>,
+    /// Required `aud` claim. Token is rejected if the audience doesn't match.
+    pub audience: Option<String>,
+    /// JWT claim used as the agent identity. Defaults to `"sub"`.
+    #[serde(default = "default_agent_claim")]
+    pub agent_claim: String,
+}
+
+fn default_agent_claim() -> String {
+    "sub".to_string()
+}
+
+// ── Rules ─────────────────────────────────────────────────────────────────────
 
 #[derive(Debug, Deserialize, Default)]
 pub struct Rules {

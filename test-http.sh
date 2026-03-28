@@ -447,6 +447,36 @@ kill "$RELOAD_PID" 2>/dev/null || true
 RELOAD_PID=""
 rm -f "$RELOAD_CONFIG"
 
+# ══ NEW: JWT auth ═════════════════════════════════════════════════════════════
+
+echo ""
+echo "━━━ 22. JWT auth ━━━"
+# Pre-computed HS256 token: {"sub":"jwt-agent","exp":9999999999}
+# Secret: "test-jwt-secret" — matches auth.secret in gateway.yml
+JWT_TOKEN="eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJqd3QtYWdlbnQiLCJleHAiOjk5OTk5OTk5OTl9.2BhA_cFyVkszZaPrzdXbUlLRs5tNMXhzyFLA03g5tsE"
+
+JWT_OUT=$(curl -s -D /tmp/jwt-headers.txt -X POST \
+    -H "Content-Type: application/json" \
+    -H "Authorization: Bearer $JWT_TOKEN" \
+    -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"ignored","version":"1.0.0"}}}' \
+    "http://localhost:${GATEWAY_PORT}/mcp")
+JWT_SID=$(grep -i "mcp-session-id:" /tmp/jwt-headers.txt | awk '{print $2}' | tr -d '\r\n')
+
+check "JWT initialize → session created"  "$JWT_OUT" "serverInfo"
+check_absent "JWT session header present" "$JWT_SID" "^$"
+
+ECHO_OUT=$(curl -s -X POST -H "Content-Type: application/json" -H "Mcp-Session-Id: $JWT_SID" \
+    -d '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"echo","arguments":{"text":"jwt-works"}}}' \
+    "http://localhost:${GATEWAY_PORT}/mcp")
+check "JWT session can call echo (jwt-agent policy)" "$ECHO_OUT" "jwt-works"
+
+INVALID_OUT=$(curl -s -o /dev/null -w "%{http_code}" -X POST \
+    -H "Content-Type: application/json" \
+    -H "Authorization: Bearer invalid.token.here" \
+    -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"x","version":"1.0.0"}}}' \
+    "http://localhost:${GATEWAY_PORT}/mcp")
+check "invalid JWT → 401" "$INVALID_OUT" "401"
+
 # ══ NEW: IP rate limit ════════════════════════════════════════════════════════
 
 echo ""

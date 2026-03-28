@@ -5,6 +5,7 @@ use mcp_gateway::{
     },
     config::{AuditConfig, Config, TransportConfig},
     gateway::McpGateway,
+    jwt::JwtValidator,
     live_config::LiveConfig,
     metrics::GatewayMetrics,
     middleware::{
@@ -140,6 +141,16 @@ async fn main() -> anyhow::Result<()> {
 
     let metrics = Arc::new(GatewayMetrics::new()?);
 
+    // ── JWT validator — built once at startup ───────────────────────────────
+    let jwt = config.auth.map(|jwt_cfg| {
+        if let Some(url) = &jwt_cfg.jwks_url {
+            tracing::info!(url, "JWT auth via JWKS");
+        } else {
+            tracing::info!("JWT auth via HMAC secret");
+        }
+        Arc::new(JwtValidator::new(jwt_cfg))
+    });
+
     match config.transport {
         TransportConfig::Http { addr, upstream, session_ttl_secs, tls, circuit_breaker } => {
             tracing::info!(upstream, addr, "HTTP mode");
@@ -156,7 +167,7 @@ async fn main() -> anyhow::Result<()> {
                 Arc::clone(&metrics),
                 config_rx.clone(),
             ));
-            HttpTransport::new(addr, session_ttl_secs, tls, metrics, config_rx)
+            HttpTransport::new(addr, session_ttl_secs, tls, metrics, config_rx, jwt)
                 .serve(gateway)
                 .await?;
         }

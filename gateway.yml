@@ -54,6 +54,16 @@ agents:
       - secret_dump
     rate_limit: 10
 
+  # Agent identity derived from JWT "sub" claim — for JWT auth test
+  jwt-agent:
+    allowed_tools:
+      - echo
+    rate_limit: 10
+
+auth:
+  secret: "test-jwt-secret"
+  agent_claim: "sub"
+
 rules:
   # ip_rate_limit: 100  # max tools/call per minute per IP (HTTP mode)
   block_patterns:

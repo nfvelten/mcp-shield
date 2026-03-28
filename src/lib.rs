@@ -1,6 +1,7 @@
 pub mod audit;
 pub mod config;
 pub mod gateway;
+pub mod jwt;
 pub mod live_config;
 pub mod metrics;
 pub mod middleware;
