@@ -182,6 +182,22 @@ pub struct Rules {
     pub ip_rate_limit: Option<usize>,
 }
 
+#[cfg(test)]
+pub(crate) fn make_agent(
+    allowed: Option<Vec<&str>>,
+    denied: Vec<&str>,
+    rate_limit: usize,
+) -> AgentPolicy {
+    AgentPolicy {
+        allowed_tools: allowed.map(|v| v.into_iter().map(String::from).collect()),
+        denied_tools: denied.into_iter().map(String::from).collect(),
+        rate_limit,
+        tool_rate_limits: std::collections::HashMap::new(),
+        upstream: None,
+        api_key: None,
+    }
+}
+
 impl Config {
     pub fn from_file(path: &str) -> anyhow::Result<Self> {
         let s = std::fs::read_to_string(path)
@@ -244,5 +260,99 @@ impl Config {
         }
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::HashMap;
+
+    fn base() -> Config {
+        Config {
+            transport: TransportConfig::default(),
+            audit: None,
+            audits: vec![],
+            agents: HashMap::new(),
+            rules: Rules::default(),
+            upstreams: HashMap::new(),
+            auth: None,
+            admin_token: None,
+        }
+    }
+
+    #[test]
+    fn empty_config_passes_validate() {
+        assert!(base().validate().is_ok());
+    }
+
+    #[test]
+    fn invalid_regex_is_rejected() {
+        let mut cfg = base();
+        cfg.rules.block_patterns = vec!["[unclosed".to_string()];
+        assert!(cfg.validate().is_err());
+    }
+
+    #[test]
+    fn valid_block_patterns_pass() {
+        let mut cfg = base();
+        cfg.rules.block_patterns = vec!["private_key".to_string(), r"\bsecret\b".to_string()];
+        assert!(cfg.validate().is_ok());
+    }
+
+    #[test]
+    fn tool_name_with_spaces_is_rejected() {
+        let mut cfg = base();
+        cfg.agents.insert("a".to_string(), make_agent(Some(vec!["bad name"]), vec![], 60));
+        assert!(cfg.validate().is_err());
+    }
+
+    #[test]
+    fn tool_name_with_exclamation_is_rejected() {
+        let mut cfg = base();
+        cfg.agents.insert("a".to_string(), make_agent(None, vec!["bad!tool"], 60));
+        assert!(cfg.validate().is_err());
+    }
+
+    #[test]
+    fn valid_tool_names_pass() {
+        let mut cfg = base();
+        cfg.agents.insert(
+            "a".to_string(),
+            make_agent(Some(vec!["read_file", "list-dir", "tools/v2.echo"]), vec!["delete_file"], 60),
+        );
+        assert!(cfg.validate().is_ok());
+    }
+
+    #[test]
+    fn unknown_upstream_reference_fails() {
+        let mut cfg = base();
+        let mut policy = make_agent(None, vec![], 60);
+        policy.upstream = Some("ghost".to_string());
+        cfg.agents.insert("a".to_string(), policy);
+        assert!(cfg.validate().is_err());
+    }
+
+    #[test]
+    fn known_upstream_reference_passes() {
+        let mut cfg = base();
+        cfg.upstreams.insert("mcp".to_string(), "http://localhost:3000/mcp".to_string());
+        let mut policy = make_agent(None, vec![], 60);
+        policy.upstream = Some("mcp".to_string());
+        cfg.agents.insert("a".to_string(), policy);
+        assert!(cfg.validate().is_ok());
+    }
+
+    #[test]
+    fn zero_circuit_breaker_threshold_fails() {
+        let mut cfg = base();
+        cfg.transport = TransportConfig::Http {
+            addr: "0.0.0.0:4000".to_string(),
+            upstream: "http://localhost:3000/mcp".to_string(),
+            session_ttl_secs: 3600,
+            tls: None,
+            circuit_breaker: CircuitBreakerConfig { threshold: 0, recovery_secs: 30 },
+        };
+        assert!(cfg.validate().is_err());
     }
 }

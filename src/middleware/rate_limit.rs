@@ -8,6 +8,134 @@ use std::{
 };
 use tokio::sync::{watch, Mutex};
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::AgentPolicy;
+
+    fn policy(rate_limit: usize) -> AgentPolicy {
+        AgentPolicy {
+            allowed_tools: None,
+            denied_tools: vec![],
+            rate_limit,
+            tool_rate_limits: HashMap::new(),
+            upstream: None,
+            api_key: None,
+        }
+    }
+
+    fn make_mw(agents: HashMap<String, AgentPolicy>, ip_limit: Option<usize>) -> RateLimitMiddleware {
+        let live = Arc::new(LiveConfig::new(agents, vec![], ip_limit));
+        let (_, rx) = watch::channel(live);
+        RateLimitMiddleware::new(rx)
+    }
+
+    fn ctx(agent: &str, tool: &str, ip: Option<&str>) -> McpContext {
+        McpContext {
+            agent_id: agent.to_string(),
+            method: "tools/call".to_string(),
+            tool_name: Some(tool.to_string()),
+            arguments: None,
+            client_ip: ip.map(String::from),
+        }
+    }
+
+    #[tokio::test]
+    async fn non_tools_call_always_allowed() {
+        let mw = make_mw(HashMap::new(), None);
+        let ctx = McpContext {
+            agent_id: "a".to_string(),
+            method: "initialize".to_string(),
+            tool_name: None,
+            arguments: None,
+            client_ip: None,
+        };
+        assert!(matches!(mw.check(&ctx).await, Decision::Allow));
+    }
+
+    #[tokio::test]
+    async fn unknown_agent_passes_to_auth_middleware() {
+        // Rate limit doesn't block unknown agents — that's auth's job
+        let mw = make_mw(HashMap::new(), None);
+        assert!(matches!(mw.check(&ctx("ghost", "echo", None)).await, Decision::Allow));
+    }
+
+    #[tokio::test]
+    async fn within_global_limit_allowed() {
+        let mut agents = HashMap::new();
+        agents.insert("a".to_string(), policy(3));
+        let mw = make_mw(agents, None);
+        for _ in 0..3 {
+            assert!(matches!(mw.check(&ctx("a", "echo", None)).await, Decision::Allow));
+        }
+    }
+
+    #[tokio::test]
+    async fn exceeds_global_limit_blocked() {
+        let mut agents = HashMap::new();
+        agents.insert("a".to_string(), policy(2));
+        let mw = make_mw(agents, None);
+        assert!(matches!(mw.check(&ctx("a", "echo", None)).await, Decision::Allow));
+        assert!(matches!(mw.check(&ctx("a", "echo", None)).await, Decision::Allow));
+        assert!(matches!(mw.check(&ctx("a", "echo", None)).await, Decision::Block { .. }));
+    }
+
+    #[tokio::test]
+    async fn per_tool_rate_limit_enforced() {
+        let mut tool_limits = HashMap::new();
+        tool_limits.insert("search".to_string(), 1usize);
+        let mut agents = HashMap::new();
+        agents.insert(
+            "a".to_string(),
+            AgentPolicy {
+                allowed_tools: None,
+                denied_tools: vec![],
+                rate_limit: 100,
+                tool_rate_limits: tool_limits,
+                upstream: None,
+                api_key: None,
+            },
+        );
+        let mw = make_mw(agents, None);
+        assert!(matches!(mw.check(&ctx("a", "search", None)).await, Decision::Allow));
+        assert!(matches!(mw.check(&ctx("a", "search", None)).await, Decision::Block { .. }));
+        // Other tools not affected
+        assert!(matches!(mw.check(&ctx("a", "echo", None)).await, Decision::Allow));
+    }
+
+    #[tokio::test]
+    async fn ip_rate_limit_enforced() {
+        let mut agents = HashMap::new();
+        agents.insert("a".to_string(), policy(100));
+        let mw = make_mw(agents, Some(2));
+        assert!(matches!(mw.check(&ctx("a", "echo", Some("1.2.3.4"))).await, Decision::Allow));
+        assert!(matches!(mw.check(&ctx("a", "echo", Some("1.2.3.4"))).await, Decision::Allow));
+        assert!(matches!(mw.check(&ctx("a", "echo", Some("1.2.3.4"))).await, Decision::Block { .. }));
+    }
+
+    #[tokio::test]
+    async fn different_ips_have_separate_limits() {
+        let mut agents = HashMap::new();
+        agents.insert("a".to_string(), policy(100));
+        let mw = make_mw(agents, Some(1));
+        assert!(matches!(mw.check(&ctx("a", "echo", Some("1.1.1.1"))).await, Decision::Allow));
+        assert!(matches!(mw.check(&ctx("a", "echo", Some("2.2.2.2"))).await, Decision::Allow));
+        // Second call from first IP blocked
+        assert!(matches!(mw.check(&ctx("a", "echo", Some("1.1.1.1"))).await, Decision::Block { .. }));
+    }
+
+    #[tokio::test]
+    async fn no_client_ip_skips_ip_limit() {
+        let mut agents = HashMap::new();
+        agents.insert("a".to_string(), policy(100));
+        let mw = make_mw(agents, Some(1));
+        // Multiple calls without IP — IP limit never applied
+        for _ in 0..5 {
+            assert!(matches!(mw.check(&ctx("a", "echo", None)).await, Decision::Allow));
+        }
+    }
+}
+
 pub struct RateLimitMiddleware {
     config: watch::Receiver<Arc<LiveConfig>>,
     /// Per-agent sliding window counters — keyed by agent_id.

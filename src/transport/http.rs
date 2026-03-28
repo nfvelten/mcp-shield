@@ -334,12 +334,11 @@ async fn handle_health() -> impl IntoResponse {
     )
 }
 
-/// Returns `true` if the request is authorized to access admin endpoints.
-/// If `admin_token` is None, the endpoint is publicly accessible.
-/// Otherwise, the request must carry `Authorization: Bearer <admin_token>`.
-fn check_admin_auth(state: &HttpState, headers: &HeaderMap) -> bool {
-    let Some(expected) = &state.admin_token else {
-        return true; // no token configured → open
+/// Core Bearer token check — extracted for testability.
+/// Returns `true` if `expected` is None (open) or matches the Bearer token in `headers`.
+fn check_bearer_token(expected: Option<&str>, headers: &HeaderMap) -> bool {
+    let Some(expected) = expected else {
+        return true;
     };
     let provided = headers
         .get("authorization")
@@ -347,6 +346,10 @@ fn check_admin_auth(state: &HttpState, headers: &HeaderMap) -> bool {
         .and_then(|v| v.strip_prefix("Bearer "))
         .unwrap_or("");
     expected.as_bytes().ct_eq(provided.as_bytes()).into()
+}
+
+fn check_admin_auth(state: &HttpState, headers: &HeaderMap) -> bool {
+    check_bearer_token(state.admin_token.as_deref(), headers)
 }
 
 async fn handle_metrics(
@@ -643,4 +646,191 @@ async fn resolve_agent(
         .and_then(|v| v.to_str().ok())
         .unwrap_or("unknown")
         .to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::live_config::LiveConfig;
+    use regex::Regex;
+    use std::collections::HashMap;
+
+    // ── chrono_ts ─────────────────────────────────────────────────────────────
+
+    #[test]
+    fn unix_epoch_formats_correctly() {
+        assert_eq!(chrono_ts(0), "1970-01-01 00:00:00");
+    }
+
+    #[test]
+    fn known_timestamp_formats_correctly() {
+        // 2001-09-09T01:46:40Z
+        assert_eq!(chrono_ts(1_000_000_000), "2001-09-09 01:46:40");
+    }
+
+    #[test]
+    fn out_of_range_timestamp_falls_back_to_string() {
+        // i64::MIN is way before year 0 — chrono cannot represent it
+        let ts = i64::MIN;
+        assert_eq!(chrono_ts(ts), ts.to_string());
+    }
+
+    // ── html_escape ───────────────────────────────────────────────────────────
+
+    #[test]
+    fn html_escape_all_special_chars() {
+        assert_eq!(html_escape("<script>&\"alert\"</script>"), "&lt;script&gt;&amp;&quot;alert&quot;&lt;/script&gt;");
+    }
+
+    #[test]
+    fn html_escape_no_special_chars_unchanged() {
+        assert_eq!(html_escape("hello world 123"), "hello world 123");
+    }
+
+    #[test]
+    fn html_escape_empty_string() {
+        assert_eq!(html_escape(""), "");
+    }
+
+    // ── check_bearer_token ────────────────────────────────────────────────────
+
+    fn headers_with_bearer(token: &str) -> HeaderMap {
+        let mut h = HeaderMap::new();
+        h.insert(
+            axum::http::header::AUTHORIZATION,
+            HeaderValue::from_str(&format!("Bearer {token}")).unwrap(),
+        );
+        h
+    }
+
+    #[test]
+    fn no_expected_token_is_open() {
+        assert!(check_bearer_token(None, &HeaderMap::new()));
+    }
+
+    #[test]
+    fn correct_token_passes() {
+        let h = headers_with_bearer("my-secret-token");
+        assert!(check_bearer_token(Some("my-secret-token"), &h));
+    }
+
+    #[test]
+    fn wrong_token_fails() {
+        let h = headers_with_bearer("wrong-token");
+        assert!(!check_bearer_token(Some("my-secret-token"), &h));
+    }
+
+    #[test]
+    fn missing_authorization_header_fails() {
+        assert!(!check_bearer_token(Some("my-secret-token"), &HeaderMap::new()));
+    }
+
+    #[test]
+    fn non_bearer_scheme_fails() {
+        let mut h = HeaderMap::new();
+        h.insert(
+            axum::http::header::AUTHORIZATION,
+            HeaderValue::from_str("Basic my-secret-token").unwrap(),
+        );
+        assert!(!check_bearer_token(Some("my-secret-token"), &h));
+    }
+
+    // ── SessionStore ──────────────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn session_create_and_resolve() {
+        let store = SessionStore::new(3600);
+        let sid = store.create("cursor".to_string()).await;
+        assert_eq!(store.resolve(&sid).await, Some("cursor".to_string()));
+    }
+
+    #[tokio::test]
+    async fn expired_session_not_resolved() {
+        let store = SessionStore::new(0); // TTL = 0 seconds → immediately expired
+        let sid = store.create("cursor".to_string()).await;
+        // Wait a tiny bit to ensure elapsed > 0
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        assert_eq!(store.resolve(&sid).await, None);
+    }
+
+    #[tokio::test]
+    async fn unknown_session_not_resolved() {
+        let store = SessionStore::new(3600);
+        assert_eq!(store.resolve("no-such-id").await, None);
+    }
+
+    #[tokio::test]
+    async fn invalidate_existing_session_returns_true() {
+        let store = SessionStore::new(3600);
+        let sid = store.create("agent".to_string()).await;
+        assert!(store.invalidate(&sid).await);
+    }
+
+    #[tokio::test]
+    async fn invalidate_unknown_session_returns_false() {
+        let store = SessionStore::new(3600);
+        assert!(!store.invalidate("no-such-id").await);
+    }
+
+    #[tokio::test]
+    async fn invalidated_session_cannot_be_resolved() {
+        let store = SessionStore::new(3600);
+        let sid = store.create("agent".to_string()).await;
+        store.invalidate(&sid).await;
+        assert_eq!(store.resolve(&sid).await, None);
+    }
+
+    // ── parse_and_filter_sse ─────────────────────────────────────────────────
+
+    fn empty_config_rx() -> watch::Receiver<Arc<LiveConfig>> {
+        let (_, rx) = watch::channel(Arc::new(LiveConfig::new(HashMap::new(), vec![], None)));
+        rx
+    }
+
+    fn config_rx_with_pattern(pattern: &str) -> watch::Receiver<Arc<LiveConfig>> {
+        let re = Regex::new(pattern).unwrap();
+        let (_, rx) = watch::channel(Arc::new(LiveConfig::new(HashMap::new(), vec![re], None)));
+        rx
+    }
+
+    #[test]
+    fn event_with_data_returns_some() {
+        let rx = empty_config_rx();
+        let raw = "event: message\ndata: hello world";
+        assert!(parse_and_filter_sse(raw, &rx).is_some());
+    }
+
+    #[test]
+    fn comment_only_returns_some_keepalive() {
+        let rx = empty_config_rx();
+        let raw = ": keepalive";
+        assert!(parse_and_filter_sse(raw, &rx).is_some());
+    }
+
+    #[test]
+    fn empty_raw_returns_none() {
+        let rx = empty_config_rx();
+        assert!(parse_and_filter_sse("", &rx).is_none());
+    }
+
+    #[test]
+    fn event_without_data_or_comment_returns_none() {
+        let rx = empty_config_rx();
+        assert!(parse_and_filter_sse("id: 123", &rx).is_none());
+    }
+
+    #[test]
+    fn data_not_matching_pattern_returns_some() {
+        let rx = config_rx_with_pattern("secret");
+        let raw = "data: harmless text";
+        assert!(parse_and_filter_sse(raw, &rx).is_some());
+    }
+
+    #[test]
+    fn data_matching_pattern_still_returns_some() {
+        // Redaction replaces content but event is not dropped
+        let rx = config_rx_with_pattern("secret");
+        let raw = "data: my secret token";
+        assert!(parse_and_filter_sse(raw, &rx).is_some());
+    }
 }

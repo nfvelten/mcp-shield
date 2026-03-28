@@ -32,6 +32,7 @@ pub trait Middleware: Send + Sync {
 }
 
 /// Composable pipeline — middlewares are executed in insertion order.
+#[allow(dead_code)]
 #[derive(Default)]
 pub struct Pipeline {
     middlewares: Vec<Arc<dyn Middleware>>,
@@ -56,5 +57,92 @@ impl Pipeline {
             }
         }
         Decision::Allow
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    struct AlwaysAllow;
+    #[async_trait]
+    impl Middleware for AlwaysAllow {
+        fn name(&self) -> &'static str { "allow" }
+        async fn check(&self, _: &McpContext) -> Decision { Decision::Allow }
+    }
+
+    struct AlwaysBlock;
+    #[async_trait]
+    impl Middleware for AlwaysBlock {
+        fn name(&self) -> &'static str { "block" }
+        async fn check(&self, _: &McpContext) -> Decision {
+            Decision::Block { reason: "blocked".to_string() }
+        }
+    }
+
+    struct Counter(Arc<AtomicUsize>);
+    #[async_trait]
+    impl Middleware for Counter {
+        fn name(&self) -> &'static str { "counter" }
+        async fn check(&self, _: &McpContext) -> Decision {
+            self.0.fetch_add(1, Ordering::SeqCst);
+            Decision::Allow
+        }
+    }
+
+    fn ctx() -> McpContext {
+        McpContext {
+            agent_id: "test".to_string(),
+            method: "tools/call".to_string(),
+            tool_name: Some("echo".to_string()),
+            arguments: None,
+            client_ip: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn empty_pipeline_allows() {
+        let p = Pipeline::new();
+        assert!(matches!(p.run(&ctx()).await, Decision::Allow));
+    }
+
+    #[tokio::test]
+    async fn all_allow_middlewares_passes() {
+        let p = Pipeline::new()
+            .add(Arc::new(AlwaysAllow))
+            .add(Arc::new(AlwaysAllow));
+        assert!(matches!(p.run(&ctx()).await, Decision::Allow));
+    }
+
+    #[tokio::test]
+    async fn first_block_short_circuits() {
+        let counter = Arc::new(AtomicUsize::new(0));
+        let p = Pipeline::new()
+            .add(Arc::new(AlwaysBlock))
+            .add(Arc::new(Counter(Arc::clone(&counter))));
+        assert!(matches!(p.run(&ctx()).await, Decision::Block { .. }));
+        assert_eq!(counter.load(Ordering::SeqCst), 0); // second middleware never ran
+    }
+
+    #[tokio::test]
+    async fn middle_block_stops_rest() {
+        let counter = Arc::new(AtomicUsize::new(0));
+        let p = Pipeline::new()
+            .add(Arc::new(AlwaysAllow))
+            .add(Arc::new(AlwaysBlock))
+            .add(Arc::new(Counter(Arc::clone(&counter))));
+        assert!(matches!(p.run(&ctx()).await, Decision::Block { .. }));
+        assert_eq!(counter.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn block_reason_preserved() {
+        let p = Pipeline::new().add(Arc::new(AlwaysBlock));
+        if let Decision::Block { reason } = p.run(&ctx()).await {
+            assert_eq!(reason, "blocked");
+        } else {
+            panic!("expected Block");
+        }
     }
 }

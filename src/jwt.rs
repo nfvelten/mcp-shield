@@ -159,3 +159,135 @@ impl JwtValidator {
             })
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::JwtConfig;
+    use jsonwebtoken::{encode, EncodingKey, Header};
+    use serde_json::json;
+
+    const SECRET: &str = "test-secret";
+
+    // Pre-built token: {"sub":"test-agent","exp":9999999999}  secret="test-secret"
+    // Generated via: echo -n '...' | jwt-cli or jsonwebtoken::encode below
+    fn make_token(claims: serde_json::Value, secret: &str) -> String {
+        encode(
+            &Header::default(), // HS256
+            &claims,
+            &EncodingKey::from_secret(secret.as_bytes()),
+        )
+        .unwrap()
+    }
+
+    fn validator(secret: &str) -> JwtValidator {
+        JwtValidator::new(JwtConfig {
+            secret: Some(secret.to_string()),
+            jwks_url: None,
+            issuer: None,
+            audience: None,
+            agent_claim: "sub".to_string(),
+        })
+    }
+
+    #[tokio::test]
+    async fn valid_hmac_token_returns_agent_id() {
+        let token = make_token(json!({"sub": "test-agent", "exp": 9_999_999_999u64}), SECRET);
+        let v = validator(SECRET);
+        assert_eq!(v.validate(&token).await.unwrap(), "test-agent");
+    }
+
+    #[tokio::test]
+    async fn wrong_secret_fails() {
+        let token = make_token(json!({"sub": "test-agent", "exp": 9_999_999_999u64}), SECRET);
+        let v = validator("wrong-secret");
+        assert!(v.validate(&token).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn expired_token_fails() {
+        let token = make_token(json!({"sub": "test-agent", "exp": 1u64}), SECRET);
+        let v = validator(SECRET);
+        assert!(v.validate(&token).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn token_without_exp_fails() {
+        // set_required_spec_claims(&["exp"]) enforces this
+        let token = make_token(json!({"sub": "test-agent"}), SECRET);
+        let v = validator(SECRET);
+        assert!(v.validate(&token).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn neither_secret_nor_jwks_fails() {
+        let v = JwtValidator::new(JwtConfig {
+            secret: None,
+            jwks_url: None,
+            issuer: None,
+            audience: None,
+            agent_claim: "sub".to_string(),
+        });
+        let token = make_token(json!({"sub": "a", "exp": 9_999_999_999u64}), SECRET);
+        assert!(v.validate(&token).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn custom_agent_claim_extracted() {
+        let v = JwtValidator::new(JwtConfig {
+            secret: Some(SECRET.to_string()),
+            jwks_url: None,
+            issuer: None,
+            audience: None,
+            agent_claim: "agent_id".to_string(),
+        });
+        let token = make_token(json!({"agent_id": "my-agent", "exp": 9_999_999_999u64}), SECRET);
+        assert_eq!(v.validate(&token).await.unwrap(), "my-agent");
+    }
+
+    #[tokio::test]
+    async fn missing_agent_claim_fails() {
+        let token = make_token(json!({"exp": 9_999_999_999u64}), SECRET); // no "sub"
+        let v = validator(SECRET);
+        assert!(v.validate(&token).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn non_string_agent_claim_fails() {
+        let token = make_token(json!({"sub": 42, "exp": 9_999_999_999u64}), SECRET);
+        let v = validator(SECRET);
+        assert!(v.validate(&token).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn issuer_mismatch_fails() {
+        let v = JwtValidator::new(JwtConfig {
+            secret: Some(SECRET.to_string()),
+            jwks_url: None,
+            issuer: Some("https://expected.example.com".to_string()),
+            audience: None,
+            agent_claim: "sub".to_string(),
+        });
+        let token = make_token(
+            json!({"sub": "a", "exp": 9_999_999_999u64, "iss": "https://other.example.com"}),
+            SECRET,
+        );
+        assert!(v.validate(&token).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn issuer_match_passes() {
+        let v = JwtValidator::new(JwtConfig {
+            secret: Some(SECRET.to_string()),
+            jwks_url: None,
+            issuer: Some("https://auth.example.com".to_string()),
+            audience: None,
+            agent_claim: "sub".to_string(),
+        });
+        let token = make_token(
+            json!({"sub": "a", "exp": 9_999_999_999u64, "iss": "https://auth.example.com"}),
+            SECRET,
+        );
+        assert_eq!(v.validate(&token).await.unwrap(), "a");
+    }
+}
