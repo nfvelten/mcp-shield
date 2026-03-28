@@ -1,0 +1,16 @@
+services:
+  gateway:
+    build: .
+    ports:
+      - "4000:4000"
+    volumes:
+      # Mount your own config to override the default
+      - ./gateway.yml:/app/gateway.yml:ro
+      # Persist the SQLite audit log on the host
+      - ./gateway-audit.db:/app/gateway-audit.db
+    environment:
+      # LOG_FORMAT=json   → structured JSON (default in Docker)
+      # LOG_FORMAT=pretty → human-readable
+      LOG_FORMAT: json
+      # LOG_LEVEL: debug  → verbose output
+    restart: unless-stopped
