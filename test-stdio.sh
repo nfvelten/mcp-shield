@@ -3,7 +3,7 @@
 # Each block sends messages via stdin and captures responses via stdout.
 
 set -euo pipefail
-BINARY="./target/debug/gateway"
+BINARY="./target/debug/mcp-shield"
 CONFIG="gateway-stdio.yml"
 PASS=0
 FAIL=0

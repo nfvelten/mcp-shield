@@ -34,11 +34,25 @@ Agent (Cursor, Claude, etc.)
 
 ## Installation
 
+Download a pre-built binary for your platform from the [releases page](https://github.com/nfvelten/mcp-shield/releases):
+
+| Platform | Archive |
+|---|---|
+| Linux x64 (static) | `mcp-shield-vX.Y.Z-x86_64-unknown-linux-musl.tar.gz` |
+| Linux ARM64 (static) | `mcp-shield-vX.Y.Z-aarch64-unknown-linux-musl.tar.gz` |
+| macOS x64 | `mcp-shield-vX.Y.Z-x86_64-apple-darwin.tar.gz` |
+| macOS Apple Silicon | `mcp-shield-vX.Y.Z-aarch64-apple-darwin.tar.gz` |
+| Windows x64 | `mcp-shield-vX.Y.Z-x86_64-pc-windows-msvc.zip` |
+
+Each archive contains `mcp-shield` (the proxy) and `mcp-shield-audit` (the CLI).
+
+Or install from crates.io (requires Rust 1.85+):
+
 ```sh
 cargo install mcp-shield
 ```
 
-Or build from source (requires Rust 1.85+):
+Or build from source:
 
 ```sh
 git clone https://github.com/nfvelten/mcp-shield
@@ -47,8 +61,6 @@ cargo build --release
 ```
 
 Binaries will be at `target/release/mcp-shield` and `target/release/mcp-shield-audit`.
-
-Or download a pre-built binary from the [releases page](https://github.com/nfvelten/mcp-shield/releases).
 
 ### Docker
 

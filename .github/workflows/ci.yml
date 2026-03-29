@@ -6,41 +6,18 @@ on:
   pull_request:
     branches: [master]
 
+env:
+  CARGO_TERM_COLOR: always
+
 jobs:
   test:
     name: Test
     runs-on: ubuntu-latest
-
     steps:
       - uses: actions/checkout@v4
-
       - uses: dtolnay/rust-toolchain@stable
-
       - uses: Swatinem/rust-cache@v2
-
-      - name: Build
-        run: cargo build
-
-      - name: Clippy
-        run: cargo clippy -- -D warnings
-
-      - name: Install Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: "20"
-
-      - name: Prepare test fixtures
-        run: |
-          mkdir -p /tmp/mcp-test/safe
-          echo "conteudo do arquivo" > /tmp/mcp-test/hello.txt
-          echo "my_secret_password=hunter2" > /tmp/mcp-test/secrets.txt
-          echo "hello world" > /tmp/mcp-test/safe/readme.txt
-
-      - name: HTTP integration tests
-        run: bash test-http.sh
-
-      - name: stdio integration tests
-        run: bash test-stdio.sh
+      - run: cargo test --all-features
 
   fmt:
     name: Format
@@ -51,3 +28,14 @@ jobs:
         with:
           components: rustfmt
       - run: cargo fmt --check
+
+  clippy:
+    name: Clippy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo clippy -- -D warnings

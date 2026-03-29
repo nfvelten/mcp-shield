@@ -4,7 +4,7 @@
 
 set -euo pipefail
 
-GATEWAY="./target/debug/gateway"
+GATEWAY="./target/debug/mcp-shield"
 DUMMY="./target/debug/dummy-server"
 CONFIG="gateway.yml"
 GATEWAY_PORT=4000
@@ -210,7 +210,7 @@ check "unknown agent blocked" "$OUT" "unknown"
 echo ""
 echo "━━━ 9. /metrics endpoint ━━━"
 METRICS=$(curl -s "http://localhost:${GATEWAY_PORT}/metrics")
-check "metrics endpoint responds"              "$METRICS" "mcp_gateway_requests_total"
+check "metrics endpoint responds"              "$METRICS" "mcp_shield_requests_total"
 check "metrics tracks allowed requests"        "$METRICS" 'outcome="allowed"'
 check "metrics tracks blocked requests"        "$METRICS" 'outcome="blocked"'
 
@@ -394,7 +394,7 @@ rules:
     - "reload-blocker"
 YMLEOF
 
-./target/debug/gateway "$RELOAD_CONFIG" > /dev/null 2>&1 &
+./target/debug/mcp-shield "$RELOAD_CONFIG" > /dev/null 2>&1 &
 RELOAD_PID=$!
 wait_for_port $RELOAD_PORT
 
@@ -497,7 +497,7 @@ agents:
 rules:
   ip_rate_limit: 3
 YMLEOF
-./target/debug/gateway "$IP_CONFIG" 2>/dev/null &
+./target/debug/mcp-shield "$IP_CONFIG" 2>/dev/null &
 IP_GW_PID=$!
 wait_for_port $IP_PORT
 
