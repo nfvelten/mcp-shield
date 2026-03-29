@@ -94,14 +94,14 @@ impl SqliteAudit {
                         }
 
                         // Rotate by entry count — keep only the newest N rows
-                        if let Some(max) = max_entries {
-                            if let Err(e) = c.execute(
+                        if let Some(max) = max_entries
+                            && let Err(e) = c.execute(
                                 "DELETE FROM audit_log WHERE id NOT IN \
                                  (SELECT id FROM audit_log ORDER BY id DESC LIMIT ?1)",
                                 params![max as i64],
-                            ) {
-                                tracing::warn!(error = %e, "audit rotation (max_entries) failed");
-                            }
+                            )
+                        {
+                            tracing::warn!(error = %e, "audit rotation (max_entries) failed");
                         }
                         // Rotate by age — purge entries older than max_age_days
                         if let Some(days) = max_age_days {
