@@ -36,7 +36,10 @@ impl Transport for StdioTransport {
 
         // Wrapped in Arc<Mutex> to allow explicit close after the main loop
         let child_stdin = Arc::new(Mutex::new(
-            child.stdin.take().ok_or_else(|| anyhow::anyhow!("child stdin unavailable"))?,
+            child
+                .stdin
+                .take()
+                .ok_or_else(|| anyhow::anyhow!("child stdin unavailable"))?,
         ));
         let child_stdout = child
             .stdout

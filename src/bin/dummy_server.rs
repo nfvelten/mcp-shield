@@ -1,12 +1,15 @@
 use axum::{
+    Json, Router,
     extract::State,
     http::StatusCode,
-    response::{sse::{Event, KeepAlive, Sse}, IntoResponse},
+    response::{
+        IntoResponse,
+        sse::{Event, KeepAlive, Sse},
+    },
     routing::{get, post},
-    Json, Router,
 };
 use futures_util::stream;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::{convert::Infallible, sync::Arc};
 
 struct AppState {
@@ -33,16 +36,10 @@ async fn main() {
 
 /// SSE endpoint — accepts GET /mcp with Accept: text/event-stream.
 /// Returns a minimal stream: endpoint event + keepalive.
-async fn handle_sse(
-    State(_state): State<Arc<AppState>>,
-) -> impl IntoResponse {
-    let events = stream::iter(vec![
-        Ok::<Event, Infallible>(
-            Event::default()
-                .event("endpoint")
-                .data("/mcp"),
-        ),
-    ]);
+async fn handle_sse(State(_state): State<Arc<AppState>>) -> impl IntoResponse {
+    let events = stream::iter(vec![Ok::<Event, Infallible>(
+        Event::default().event("endpoint").data("/mcp"),
+    )]);
     Sse::new(events).keep_alive(KeepAlive::default())
 }
 

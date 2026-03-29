@@ -5,6 +5,6 @@ pub mod jwt;
 pub mod live_config;
 pub mod metrics;
 pub mod middleware;
+pub mod prompt_injection;
 pub mod transport;
 pub mod upstream;
-pub mod prompt_injection;

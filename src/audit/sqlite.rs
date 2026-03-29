@@ -1,6 +1,6 @@
 use super::{AuditEntry, AuditLog, Outcome};
 use async_trait::async_trait;
-use rusqlite::{params, Connection};
+use rusqlite::{Connection, params};
 use std::sync::{Arc, Mutex};
 use std::time::SystemTime;
 use tokio::sync::mpsc;
@@ -110,10 +110,9 @@ impl SqliteAudit {
                                 .unwrap_or_default()
                                 .as_secs() as i64
                                 - (days as i64 * 86400);
-                            if let Err(e) = c.execute(
-                                "DELETE FROM audit_log WHERE ts < ?1",
-                                params![cutoff],
-                            ) {
+                            if let Err(e) =
+                                c.execute("DELETE FROM audit_log WHERE ts < ?1", params![cutoff])
+                            {
                                 tracing::warn!(error = %e, "audit rotation (max_age_days) failed");
                             }
                         }

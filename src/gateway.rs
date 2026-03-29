@@ -1,13 +1,17 @@
 use crate::{
     audit::{AuditEntry, AuditLog, Outcome},
-    config::{tool_matches, FilterMode},
+    config::{FilterMode, tool_matches},
     live_config::LiveConfig,
     metrics::GatewayMetrics,
     middleware::{Decision, McpContext, Pipeline, RateLimitInfo},
     upstream::McpUpstream,
 };
-use serde_json::{json, Value};
-use std::{collections::HashMap, sync::Arc, time::{Duration, SystemTime}};
+use serde_json::{Value, json};
+use std::{
+    collections::HashMap,
+    sync::Arc,
+    time::{Duration, SystemTime},
+};
 use tokio::sync::watch;
 use uuid::Uuid;
 
@@ -31,14 +35,22 @@ impl McpGateway {
         metrics: Arc<GatewayMetrics>,
         config: watch::Receiver<Arc<LiveConfig>>,
     ) -> Self {
-        Self { pipeline, default_upstream, named_upstreams, audit, metrics, config }
+        Self {
+            pipeline,
+            default_upstream,
+            named_upstreams,
+            audit,
+            metrics,
+            config,
+        }
     }
 
     /// Select the upstream for a given agent. Falls back to `default_policy`, then the default upstream.
     fn upstream_for(&self, agent_id: &str) -> &Arc<dyn McpUpstream> {
         let upstream_name = {
             let cfg = self.config.borrow();
-            cfg.agents.get(agent_id)
+            cfg.agents
+                .get(agent_id)
                 .or(cfg.default_policy.as_ref())
                 .and_then(|p| p.upstream.clone())
         };
@@ -51,7 +63,10 @@ impl McpGateway {
     /// Returns health status for all configured upstreams.
     pub async fn upstreams_health(&self) -> HashMap<String, bool> {
         let mut map = HashMap::new();
-        map.insert("default".to_string(), self.default_upstream.is_healthy().await);
+        map.insert(
+            "default".to_string(),
+            self.default_upstream.is_healthy().await,
+        );
         for (name, up) in &self.named_upstreams {
             map.insert(name.clone(), up.is_healthy().await);
         }
@@ -67,7 +82,9 @@ impl McpGateway {
     /// Used by StdioTransport, which manages piping directly and doesn't need rate limit headers.
     pub async fn intercept(&self, agent_id: &str, msg: &Value) -> Option<Value> {
         let request_id = Uuid::new_v4().to_string();
-        self.intercept_with_ip(agent_id, msg, None, &request_id).await.0
+        self.intercept_with_ip(agent_id, msg, None, &request_id)
+            .await
+            .0
     }
 
     /// Returns `(error_response, rate_limit_info, request_id)`.
@@ -162,7 +179,9 @@ impl McpGateway {
         let request_id = Uuid::new_v4().to_string();
         let method = msg["method"].as_str().unwrap_or("").to_string();
 
-        let (err, rl) = self.intercept_with_ip(agent_id, &msg, client_ip, &request_id).await;
+        let (err, rl) = self
+            .intercept_with_ip(agent_id, &msg, client_ip, &request_id)
+            .await;
         if let Some(err) = err {
             return (Some(err), rl, request_id);
         }
@@ -184,7 +203,8 @@ impl McpGateway {
         // Per-agent timeout — overrides the default 30s client timeout.
         let timeout = {
             let cfg = self.config.borrow();
-            cfg.agents.get(agent_id)
+            cfg.agents
+                .get(agent_id)
                 .or(cfg.default_policy.as_ref())
                 .and_then(|p| p.timeout_secs)
         };
@@ -349,7 +369,14 @@ mod tests {
     }
 
     fn make_gw(agents: HashMap<String, AgentPolicy>, patterns: Vec<Regex>) -> McpGateway {
-        let live = Arc::new(LiveConfig::new(agents, patterns, vec![], None, FilterMode::Block, None));
+        let live = Arc::new(LiveConfig::new(
+            agents,
+            patterns,
+            vec![],
+            None,
+            FilterMode::Block,
+            None,
+        ));
         let (_, rx) = watch::channel(live);
         McpGateway::new(
             Pipeline::new(),
@@ -440,7 +467,10 @@ mod tests {
     #[test]
     fn filter_tools_response_denylist_removes_tool() {
         let mut agents = HashMap::new();
-        agents.insert("agent".to_string(), make_agent(None, vec!["write_file"], 60));
+        agents.insert(
+            "agent".to_string(),
+            make_agent(None, vec!["write_file"], 60),
+        );
         let gw = make_gw(agents, vec![]);
         let resp = tools_response(&["read_file", "write_file", "list_dir"]);
         let out = gw.filter_tools_response("agent", resp);
@@ -456,7 +486,10 @@ mod tests {
     #[test]
     fn filter_tools_response_allowlist_keeps_only_permitted() {
         let mut agents = HashMap::new();
-        agents.insert("agent".to_string(), make_agent(Some(vec!["read_file"]), vec![], 60));
+        agents.insert(
+            "agent".to_string(),
+            make_agent(Some(vec!["read_file"]), vec![], 60),
+        );
         let gw = make_gw(agents, vec![]);
         let resp = tools_response(&["read_file", "write_file", "delete_file"]);
         let out = gw.filter_tools_response("agent", resp);

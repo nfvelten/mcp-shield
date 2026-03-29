@@ -6,7 +6,7 @@ use std::{
     sync::Arc,
     time::{Duration, Instant},
 };
-use tokio::sync::{watch, Mutex};
+use tokio::sync::{Mutex, watch};
 
 type ToolCounts = Arc<Mutex<HashMap<(String, String), Vec<Instant>>>>;
 
@@ -27,8 +27,18 @@ mod tests {
         }
     }
 
-    fn make_mw(agents: HashMap<String, AgentPolicy>, ip_limit: Option<usize>) -> RateLimitMiddleware {
-        let live = Arc::new(LiveConfig::new(agents, vec![], vec![], ip_limit, FilterMode::Block, None));
+    fn make_mw(
+        agents: HashMap<String, AgentPolicy>,
+        ip_limit: Option<usize>,
+    ) -> RateLimitMiddleware {
+        let live = Arc::new(LiveConfig::new(
+            agents,
+            vec![],
+            vec![],
+            ip_limit,
+            FilterMode::Block,
+            None,
+        ));
         let (_, rx) = watch::channel(live);
         RateLimitMiddleware::new(rx)
     }
@@ -60,7 +70,10 @@ mod tests {
     async fn unknown_agent_passes_to_auth_middleware() {
         // Rate limit doesn't block unknown agents — that's auth's job
         let mw = make_mw(HashMap::new(), None);
-        assert!(matches!(mw.check(&ctx("ghost", "echo", None)).await, Decision::Allow { .. }));
+        assert!(matches!(
+            mw.check(&ctx("ghost", "echo", None)).await,
+            Decision::Allow { .. }
+        ));
     }
 
     #[tokio::test]
@@ -69,7 +82,10 @@ mod tests {
         agents.insert("a".to_string(), policy(3));
         let mw = make_mw(agents, None);
         for _ in 0..3 {
-            assert!(matches!(mw.check(&ctx("a", "echo", None)).await, Decision::Allow { .. }));
+            assert!(matches!(
+                mw.check(&ctx("a", "echo", None)).await,
+                Decision::Allow { .. }
+            ));
         }
     }
 
@@ -78,9 +94,18 @@ mod tests {
         let mut agents = HashMap::new();
         agents.insert("a".to_string(), policy(2));
         let mw = make_mw(agents, None);
-        assert!(matches!(mw.check(&ctx("a", "echo", None)).await, Decision::Allow { .. }));
-        assert!(matches!(mw.check(&ctx("a", "echo", None)).await, Decision::Allow { .. }));
-        assert!(matches!(mw.check(&ctx("a", "echo", None)).await, Decision::Block { .. }));
+        assert!(matches!(
+            mw.check(&ctx("a", "echo", None)).await,
+            Decision::Allow { .. }
+        ));
+        assert!(matches!(
+            mw.check(&ctx("a", "echo", None)).await,
+            Decision::Allow { .. }
+        ));
+        assert!(matches!(
+            mw.check(&ctx("a", "echo", None)).await,
+            Decision::Block { .. }
+        ));
     }
 
     #[tokio::test]
@@ -101,10 +126,19 @@ mod tests {
             },
         );
         let mw = make_mw(agents, None);
-        assert!(matches!(mw.check(&ctx("a", "search", None)).await, Decision::Allow { .. }));
-        assert!(matches!(mw.check(&ctx("a", "search", None)).await, Decision::Block { .. }));
+        assert!(matches!(
+            mw.check(&ctx("a", "search", None)).await,
+            Decision::Allow { .. }
+        ));
+        assert!(matches!(
+            mw.check(&ctx("a", "search", None)).await,
+            Decision::Block { .. }
+        ));
         // Other tools not affected
-        assert!(matches!(mw.check(&ctx("a", "echo", None)).await, Decision::Allow { .. }));
+        assert!(matches!(
+            mw.check(&ctx("a", "echo", None)).await,
+            Decision::Allow { .. }
+        ));
     }
 
     #[tokio::test]
@@ -112,9 +146,18 @@ mod tests {
         let mut agents = HashMap::new();
         agents.insert("a".to_string(), policy(100));
         let mw = make_mw(agents, Some(2));
-        assert!(matches!(mw.check(&ctx("a", "echo", Some("1.2.3.4"))).await, Decision::Allow { .. }));
-        assert!(matches!(mw.check(&ctx("a", "echo", Some("1.2.3.4"))).await, Decision::Allow { .. }));
-        assert!(matches!(mw.check(&ctx("a", "echo", Some("1.2.3.4"))).await, Decision::Block { .. }));
+        assert!(matches!(
+            mw.check(&ctx("a", "echo", Some("1.2.3.4"))).await,
+            Decision::Allow { .. }
+        ));
+        assert!(matches!(
+            mw.check(&ctx("a", "echo", Some("1.2.3.4"))).await,
+            Decision::Allow { .. }
+        ));
+        assert!(matches!(
+            mw.check(&ctx("a", "echo", Some("1.2.3.4"))).await,
+            Decision::Block { .. }
+        ));
     }
 
     #[tokio::test]
@@ -122,10 +165,19 @@ mod tests {
         let mut agents = HashMap::new();
         agents.insert("a".to_string(), policy(100));
         let mw = make_mw(agents, Some(1));
-        assert!(matches!(mw.check(&ctx("a", "echo", Some("1.1.1.1"))).await, Decision::Allow { .. }));
-        assert!(matches!(mw.check(&ctx("a", "echo", Some("2.2.2.2"))).await, Decision::Allow { .. }));
+        assert!(matches!(
+            mw.check(&ctx("a", "echo", Some("1.1.1.1"))).await,
+            Decision::Allow { .. }
+        ));
+        assert!(matches!(
+            mw.check(&ctx("a", "echo", Some("2.2.2.2"))).await,
+            Decision::Allow { .. }
+        ));
         // Second call from first IP blocked
-        assert!(matches!(mw.check(&ctx("a", "echo", Some("1.1.1.1"))).await, Decision::Block { .. }));
+        assert!(matches!(
+            mw.check(&ctx("a", "echo", Some("1.1.1.1"))).await,
+            Decision::Block { .. }
+        ));
     }
 
     #[tokio::test]
@@ -162,7 +214,10 @@ mod tests {
         agents.insert("a".to_string(), policy(100));
         let mw = make_mw(agents, Some(1));
         for _ in 0..5 {
-            assert!(matches!(mw.check(&ctx("a", "echo", None)).await, Decision::Allow { .. }));
+            assert!(matches!(
+                mw.check(&ctx("a", "echo", None)).await,
+                Decision::Allow { .. }
+            ));
         }
     }
 
@@ -178,7 +233,10 @@ mod tests {
                 panic!("expected Allow");
             }
         }
-        assert!(matches!(mw.check(&ctx("a", "echo", None)).await, Decision::Block { .. }));
+        assert!(matches!(
+            mw.check(&ctx("a", "echo", None)).await,
+            Decision::Block { .. }
+        ));
     }
 }
 
@@ -205,8 +263,7 @@ impl RateLimitMiddleware {
             let tool_counts = Arc::clone(&tool_counts);
             let ip_counts = Arc::clone(&ip_counts);
             tokio::spawn(async move {
-                let mut interval =
-                    tokio::time::interval(Duration::from_secs(300));
+                let mut interval = tokio::time::interval(Duration::from_secs(300));
                 interval.tick().await; // skip immediate tick
                 loop {
                     interval.tick().await;
@@ -237,7 +294,12 @@ impl RateLimitMiddleware {
             });
         }
 
-        Self { config, counts, tool_counts, ip_counts }
+        Self {
+            config,
+            counts,
+            tool_counts,
+            ip_counts,
+        }
     }
 }
 

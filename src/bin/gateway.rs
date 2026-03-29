@@ -1,7 +1,7 @@
 use mcp_shield::{
     audit::{
-        fanout::FanoutAudit, sqlite::SqliteAudit, stdout::StdoutAudit, webhook::WebhookAudit,
-        AuditLog,
+        AuditLog, fanout::FanoutAudit, sqlite::SqliteAudit, stdout::StdoutAudit,
+        webhook::WebhookAudit,
     },
     config::{AuditConfig, Config, TelemetryConfig, TransportConfig},
     gateway::McpGateway,
@@ -9,22 +9,24 @@ use mcp_shield::{
     live_config::LiveConfig,
     metrics::GatewayMetrics,
     middleware::{
-        auth::AuthMiddleware, payload_filter::PayloadFilterMiddleware,
-        rate_limit::RateLimitMiddleware, Pipeline,
+        Pipeline, auth::AuthMiddleware, payload_filter::PayloadFilterMiddleware,
+        rate_limit::RateLimitMiddleware,
     },
     prompt_injection,
-    transport::{http::HttpTransport, stdio::StdioTransport, Transport},
-    upstream::{http::HttpUpstream, McpUpstream},
+    transport::{Transport, http::HttpTransport, stdio::StdioTransport},
+    upstream::{McpUpstream, http::HttpUpstream},
 };
 use regex::Regex;
 use std::{collections::HashMap, sync::Arc, time::Duration};
 use tokio::sync::watch;
-use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, EnvFilter};
+use tracing_subscriber::{EnvFilter, layer::SubscriberExt, util::SubscriberInitExt};
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     // Load config first — needed for telemetry setup
-    let config_path = std::env::args().nth(1).unwrap_or_else(|| "gateway.yml".into());
+    let config_path = std::env::args()
+        .nth(1)
+        .unwrap_or_else(|| "gateway.yml".into());
     let config = Config::from_file(&config_path)?;
 
     // ── Logging + OpenTelemetry ────────────────────────────────────────────────
@@ -76,7 +78,10 @@ async fn main() -> anyhow::Result<()> {
         .collect();
 
     let injection_patterns: Vec<Regex> = if config.rules.block_prompt_injection {
-        tracing::info!("prompt injection detection enabled ({} patterns)", prompt_injection::PATTERNS.len());
+        tracing::info!(
+            "prompt injection detection enabled ({} patterns)",
+            prompt_injection::PATTERNS.len()
+        );
         prompt_injection::PATTERNS
             .iter()
             .map(|p| Regex::new(p).unwrap_or_else(|_| panic!("invalid injection regex: {p}")))
@@ -102,7 +107,7 @@ async fn main() -> anyhow::Result<()> {
         tokio::spawn(async move {
             #[cfg(unix)]
             let mut sigusr1 = {
-                use tokio::signal::unix::{signal, SignalKind};
+                use tokio::signal::unix::{SignalKind, signal};
                 signal(SignalKind::user_defined1()).expect("failed to install SIGUSR1 handler")
             };
 
@@ -119,7 +124,10 @@ async fn main() -> anyhow::Result<()> {
                 // On SIGUSR1 we reload immediately regardless of mtime.
                 #[cfg(unix)]
                 {
-                    enum Trigger { Timer, Signal }
+                    enum Trigger {
+                        Timer,
+                        Signal,
+                    }
                     let trigger = tokio::select! {
                         _ = interval.tick() => Trigger::Timer,
                         _ = sigusr1.recv() => Trigger::Signal,
@@ -175,7 +183,13 @@ async fn main() -> anyhow::Result<()> {
     });
 
     match config.transport {
-        TransportConfig::Http { addr, upstream, session_ttl_secs, tls, circuit_breaker } => {
+        TransportConfig::Http {
+            addr,
+            upstream,
+            session_ttl_secs,
+            tls,
+            circuit_breaker,
+        } => {
             tracing::info!(upstream, addr, "HTTP mode");
             let default_upstream = Arc::new(HttpUpstream::with_circuit_breaker(
                 &upstream,
@@ -190,9 +204,18 @@ async fn main() -> anyhow::Result<()> {
                 Arc::clone(&metrics),
                 config_rx.clone(),
             ));
-            HttpTransport::new(addr, session_ttl_secs, tls, metrics, config_rx, jwt, sqlite_db_path, config.admin_token)
-                .serve(gateway)
-                .await?;
+            HttpTransport::new(
+                addr,
+                session_ttl_secs,
+                tls,
+                metrics,
+                config_rx,
+                jwt,
+                sqlite_db_path,
+                config.admin_token,
+            )
+            .serve(gateway)
+            .await?;
         }
         TransportConfig::Stdio { server } => {
             tracing::info!(server = %server.join(" "), "stdio mode");
@@ -216,9 +239,17 @@ async fn main() -> anyhow::Result<()> {
 fn build_audit_backend(cfg: &AuditConfig) -> anyhow::Result<Arc<dyn AuditLog>> {
     match cfg {
         AuditConfig::Stdout => Ok(Arc::new(StdoutAudit)),
-        AuditConfig::Sqlite { path, max_entries, max_age_days } => {
+        AuditConfig::Sqlite {
+            path,
+            max_entries,
+            max_age_days,
+        } => {
             tracing::info!(path, "SQLite audit");
-            Ok(Arc::new(SqliteAudit::with_rotation(path, *max_entries, *max_age_days)?))
+            Ok(Arc::new(SqliteAudit::with_rotation(
+                path,
+                *max_entries,
+                *max_age_days,
+            )?))
         }
         AuditConfig::Webhook { url, token } => {
             tracing::info!(url, "webhook audit");
@@ -298,13 +329,15 @@ impl Drop for OtelGuard {
 /// LOG_LEVEL        → override log level (default: info)
 /// telemetry config → enables OTLP span export when present
 fn init_tracing(telemetry: Option<&TelemetryConfig>) -> Option<OtelGuard> {
-    let filter = EnvFilter::try_from_env("LOG_LEVEL")
-        .unwrap_or_else(|_| EnvFilter::new("info"));
+    let filter = EnvFilter::try_from_env("LOG_LEVEL").unwrap_or_else(|_| EnvFilter::new("info"));
     let json = std::env::var("LOG_FORMAT").as_deref() == Ok("json");
 
     let tracer = telemetry.and_then(|tel| match build_otel_tracer(tel) {
         Ok(t) => Some(t),
-        Err(e) => { eprintln!("warn: OTel init failed: {e}"); None }
+        Err(e) => {
+            eprintln!("warn: OTel init failed: {e}");
+            None
+        }
     });
 
     let has_otel = tracer.is_some();
@@ -337,17 +370,16 @@ fn init_tracing(telemetry: Option<&TelemetryConfig>) -> Option<OtelGuard> {
 
 /// Build an OTLP gRPC tracer. Returns the `Tracer` handle so the caller can
 /// create a `tracing_opentelemetry::Layer` with the correct concrete type.
-fn build_otel_tracer(
-    tel: &TelemetryConfig,
-) -> anyhow::Result<opentelemetry_sdk::trace::Tracer> {
-    use opentelemetry::trace::TracerProvider as _;
+fn build_otel_tracer(tel: &TelemetryConfig) -> anyhow::Result<opentelemetry_sdk::trace::Tracer> {
     use opentelemetry::KeyValue;
+    use opentelemetry::trace::TracerProvider as _;
     use opentelemetry_otlp::WithExportConfig;
-    use opentelemetry_sdk::{runtime::Tokio, trace::Config, Resource};
+    use opentelemetry_sdk::{Resource, runtime::Tokio, trace::Config};
 
-    let resource = Resource::new(vec![
-        KeyValue::new("service.name", tel.service_name.clone()),
-    ]);
+    let resource = Resource::new(vec![KeyValue::new(
+        "service.name",
+        tel.service_name.clone(),
+    )]);
 
     let provider = opentelemetry_otlp::new_pipeline()
         .tracing()

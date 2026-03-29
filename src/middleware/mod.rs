@@ -30,8 +30,13 @@ pub struct RateLimitInfo {
 
 /// Middleware decision: continue or block with a reason.
 pub enum Decision {
-    Allow { rl: Option<RateLimitInfo> },
-    Block { reason: String, rl: Option<RateLimitInfo> },
+    Allow {
+        rl: Option<RateLimitInfo>,
+    },
+    Block {
+        reason: String,
+        rl: Option<RateLimitInfo>,
+    },
 }
 
 /// Core trait — each middleware implements `check`.
@@ -87,23 +92,34 @@ mod tests {
     struct AlwaysAllow;
     #[async_trait]
     impl Middleware for AlwaysAllow {
-        fn name(&self) -> &'static str { "allow" }
-        async fn check(&self, _: &McpContext) -> Decision { Decision::Allow { rl: None } }
+        fn name(&self) -> &'static str {
+            "allow"
+        }
+        async fn check(&self, _: &McpContext) -> Decision {
+            Decision::Allow { rl: None }
+        }
     }
 
     struct AlwaysBlock;
     #[async_trait]
     impl Middleware for AlwaysBlock {
-        fn name(&self) -> &'static str { "block" }
+        fn name(&self) -> &'static str {
+            "block"
+        }
         async fn check(&self, _: &McpContext) -> Decision {
-            Decision::Block { reason: "blocked".to_string(), rl: None }
+            Decision::Block {
+                reason: "blocked".to_string(),
+                rl: None,
+            }
         }
     }
 
     struct Counter(Arc<AtomicUsize>);
     #[async_trait]
     impl Middleware for Counter {
-        fn name(&self) -> &'static str { "counter" }
+        fn name(&self) -> &'static str {
+            "counter"
+        }
         async fn check(&self, _: &McpContext) -> Decision {
             self.0.fetch_add(1, Ordering::SeqCst);
             Decision::Allow { rl: None }

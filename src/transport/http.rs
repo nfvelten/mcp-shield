@@ -1,25 +1,22 @@
 use super::Transport;
 use crate::{
-    config::TlsConfig,
-    gateway::McpGateway,
-    jwt::MultiJwtValidator,
-    live_config::LiveConfig,
+    config::TlsConfig, gateway::McpGateway, jwt::MultiJwtValidator, live_config::LiveConfig,
     metrics::GatewayMetrics,
 };
 use async_trait::async_trait;
+use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::{
+    Json, Router,
     extract::{ConnectInfo, State},
     http::{HeaderMap, HeaderValue, StatusCode},
     response::IntoResponse,
     routing::{delete, get, post},
-    Json, Router,
 };
-use axum::response::sse::{Event, KeepAlive, Sse};
 use futures_util::StreamExt;
 use serde_json::Value;
 use std::{collections::HashMap, convert::Infallible, net::SocketAddr, sync::Arc, time::Instant};
 use subtle::ConstantTimeEq;
-use tokio::sync::{watch, Mutex};
+use tokio::sync::{Mutex, watch};
 use uuid::Uuid;
 
 // ── Session store ────────────────────────────────────────────────────────────
@@ -32,7 +29,10 @@ struct SessionStore {
 
 impl SessionStore {
     fn new(ttl_secs: u64) -> Arc<Self> {
-        let store = Arc::new(Self { sessions: Mutex::new(HashMap::new()), ttl_secs });
+        let store = Arc::new(Self {
+            sessions: Mutex::new(HashMap::new()),
+            ttl_secs,
+        });
         // Periodically evict expired sessions so the map doesn't grow unbounded
         // when `create` is never called (e.g., long-lived connections only).
         let weak = Arc::downgrade(&store);
@@ -44,9 +44,10 @@ impl SessionStore {
                 let Some(s) = weak.upgrade() else { break };
                 let now = Instant::now();
                 let ttl = s.ttl_secs;
-                s.sessions.lock().await.retain(|_, (_, created)| {
-                    now.duration_since(*created).as_secs() < ttl
-                });
+                s.sessions
+                    .lock()
+                    .await
+                    .retain(|_, (_, created)| now.duration_since(*created).as_secs() < ttl);
             }
         });
         store
@@ -66,7 +67,11 @@ impl SessionStore {
         let sessions = self.sessions.lock().await;
         sessions.get(session_id).and_then(|(agent_id, created)| {
             let expired = Instant::now().duration_since(*created).as_secs() >= self.ttl_secs;
-            if expired { None } else { Some(agent_id.clone()) }
+            if expired {
+                None
+            } else {
+                Some(agent_id.clone())
+            }
         })
     }
 
@@ -104,7 +109,16 @@ impl HttpTransport {
         audit_db: Option<String>,
         admin_token: Option<String>,
     ) -> Self {
-        Self { addr: addr.into(), session_ttl_secs, tls, metrics, config, jwt, audit_db, admin_token }
+        Self {
+            addr: addr.into(),
+            session_ttl_secs,
+            tls,
+            metrics,
+            config,
+            jwt,
+            audit_db,
+            admin_token,
+        }
     }
 }
 
@@ -188,8 +202,9 @@ async fn serve_tls(app: Router, addr: &str, cert: &str, key: &str) -> anyhow::Re
 async fn shutdown_signal() {
     #[cfg(unix)]
     {
-        use tokio::signal::unix::{signal, SignalKind};
-        let mut sigterm = signal(SignalKind::terminate()).expect("failed to install SIGTERM handler");
+        use tokio::signal::unix::{SignalKind, signal};
+        let mut sigterm =
+            signal(SignalKind::terminate()).expect("failed to install SIGTERM handler");
         tokio::select! {
             _ = tokio::signal::ctrl_c() => {},
             _ = sigterm.recv() => {},
@@ -264,7 +279,8 @@ async fn handle_mcp(
                 Ok(agent_name) => {
                     let session_id = state.sessions.create(agent_name.clone()).await;
                     tracing::info!(session_id, agent = agent_name, "JWT session created");
-                    let (response, rl, request_id) = state.gateway.handle(&agent_name, msg, client_ip).await;
+                    let (response, rl, request_id) =
+                        state.gateway.handle(&agent_name, msg, client_ip).await;
                     return match response {
                         Some(body) => {
                             let mut res = Json(body).into_response();
@@ -274,7 +290,9 @@ async fn handle_mcp(
                             if let Ok(val) = HeaderValue::from_str(&request_id) {
                                 res.headers_mut().insert("x-request-id", val);
                             }
-                            if let Some(rl) = &rl { insert_rl_headers(&mut res, rl); }
+                            if let Some(rl) = &rl {
+                                insert_rl_headers(&mut res, rl);
+                            }
                             res
                         }
                         None => StatusCode::ACCEPTED.into_response(),
@@ -329,7 +347,9 @@ async fn handle_mcp(
                 if let Ok(val) = HeaderValue::from_str(&request_id) {
                     res.headers_mut().insert("x-request-id", val);
                 }
-                if let Some(rl) = &rl { insert_rl_headers(&mut res, rl); }
+                if let Some(rl) = &rl {
+                    insert_rl_headers(&mut res, rl);
+                }
                 res
             }
             None => StatusCode::ACCEPTED.into_response(),
@@ -345,7 +365,9 @@ async fn handle_mcp(
                     if let Ok(val) = HeaderValue::from_str(&request_id) {
                         res.headers_mut().insert("x-request-id", val);
                     }
-                    if let Some(rl) = &rl { insert_rl_headers(&mut res, rl); }
+                    if let Some(rl) = &rl {
+                        insert_rl_headers(&mut res, rl);
+                    }
                     res
                 }
                 None => StatusCode::ACCEPTED.into_response(),
@@ -374,7 +396,11 @@ async fn handle_delete_session(
 async fn handle_health(State(state): State<Arc<HttpState>>) -> impl IntoResponse {
     let upstreams = state.gateway.upstreams_health().await;
     let all_up = upstreams.values().all(|&v| v);
-    let status = if all_up { StatusCode::OK } else { StatusCode::SERVICE_UNAVAILABLE };
+    let status = if all_up {
+        StatusCode::OK
+    } else {
+        StatusCode::SERVICE_UNAVAILABLE
+    };
     (
         status,
         Json(serde_json::json!({
@@ -418,7 +444,7 @@ async fn handle_metrics(
         )],
         body,
     )
-    .into_response()
+        .into_response()
 }
 
 // ── Dashboard ─────────────────────────────────────────────────────────────────
@@ -444,36 +470,35 @@ async fn handle_dashboard(
 
     let db_path = db_path.clone();
     type AuditRow = (i64, String, String, Option<String>, String, Option<String>);
-    let rows: Vec<AuditRow> =
-        tokio::time::timeout(
-            std::time::Duration::from_secs(5),
-            tokio::task::spawn_blocking(move || {
-                let conn = rusqlite::Connection::open(&db_path)?;
-                let mut stmt = conn.prepare(
-                    "SELECT ts, agent_id, method, tool, outcome, reason \
+    let rows: Vec<AuditRow> = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        tokio::task::spawn_blocking(move || {
+            let conn = rusqlite::Connection::open(&db_path)?;
+            let mut stmt = conn.prepare(
+                "SELECT ts, agent_id, method, tool, outcome, reason \
                      FROM audit_log ORDER BY id DESC LIMIT 200",
-                )?;
-                let rows = stmt
-                    .query_map([], |row| {
-                        Ok((
-                            row.get::<_, i64>(0)?,
-                            row.get::<_, String>(1)?,
-                            row.get::<_, String>(2)?,
-                            row.get::<_, Option<String>>(3)?,
-                            row.get::<_, String>(4)?,
-                            row.get::<_, Option<String>>(5)?,
-                        ))
-                    })?
-                    .filter_map(|r| r.ok())
-                    .collect();
-                anyhow::Ok(rows)
-            }),
-        )
-        .await
-        .ok()
-        .and_then(|r| r.ok())
-        .and_then(|r| r.ok())
-        .unwrap_or_default();
+            )?;
+            let rows = stmt
+                .query_map([], |row| {
+                    Ok((
+                        row.get::<_, i64>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, Option<String>>(3)?,
+                        row.get::<_, String>(4)?,
+                        row.get::<_, Option<String>>(5)?,
+                    ))
+                })?
+                .filter_map(|r| r.ok())
+                .collect();
+            anyhow::Ok(rows)
+        }),
+    )
+    .await
+    .ok()
+    .and_then(|r| r.ok())
+    .and_then(|r| r.ok())
+    .unwrap_or_default();
 
     let mut table_rows = String::new();
     for (ts, agent, method, tool, outcome, reason) in &rows {
@@ -534,7 +559,12 @@ async fn handle_dashboard(
 </html>"#
     );
 
-    (StatusCode::OK, [(CONTENT_TYPE, "text/html; charset=utf-8")], html).into_response()
+    (
+        StatusCode::OK,
+        [(CONTENT_TYPE, "text/html; charset=utf-8")],
+        html,
+    )
+        .into_response()
 }
 
 fn chrono_ts(ts: i64) -> String {
@@ -561,10 +591,7 @@ fn html_escape(s: &str) -> String {
 ///
 /// Without a session (legacy HTTP+SSE transport): sends an `endpoint` event that
 /// tells the client where to POST `initialize`.
-async fn handle_sse(
-    State(state): State<Arc<HttpState>>,
-    headers: HeaderMap,
-) -> impl IntoResponse {
+async fn handle_sse(State(state): State<Arc<HttpState>>, headers: HeaderMap) -> impl IntoResponse {
     match resolve_agent(&state.sessions, &headers).await {
         Ok(agent_id) => {
             let upstream_url = state.gateway.upstream_url_for(&agent_id);
@@ -578,9 +605,7 @@ async fn handle_sse(
         Err(_) => {
             // Legacy HTTP+SSE: no session yet — send endpoint event
             let stream = futures_util::stream::once(async {
-                Ok::<Event, Infallible>(
-                    Event::default().event("endpoint").data("/mcp"),
-                )
+                Ok::<Event, Infallible>(Event::default().event("endpoint").data("/mcp"))
             });
             Sse::new(stream).into_response()
         }
@@ -637,15 +662,14 @@ async fn sse_proxy(
     });
 
     let stream = tokio_stream::wrappers::ReceiverStream::new(rx);
-    Sse::new(stream).keep_alive(KeepAlive::default()).into_response()
+    Sse::new(stream)
+        .keep_alive(KeepAlive::default())
+        .into_response()
 }
 
 /// Parse a raw SSE event block, apply response filtering, return an axum `Event`.
 /// Returns `None` if the event is dropped by the filter.
-fn parse_and_filter_sse(
-    raw: &str,
-    config_rx: &watch::Receiver<Arc<LiveConfig>>,
-) -> Option<Event> {
+fn parse_and_filter_sse(raw: &str, config_rx: &watch::Receiver<Arc<LiveConfig>>) -> Option<Event> {
     let mut event_type = "message".to_string();
     let mut data_parts: Vec<&str> = Vec::new();
     let mut comment: Option<&str> = None;
@@ -673,7 +697,10 @@ fn parse_and_filter_sse(
         let mut out = data;
         for pattern in cfg.block_patterns.as_ref() {
             if pattern.is_match(&out) {
-                tracing::info!(pattern = pattern.as_str(), "sensitive data redacted from SSE event");
+                tracing::info!(
+                    pattern = pattern.as_str(),
+                    "sensitive data redacted from SSE event"
+                );
                 out = pattern.replace_all(&out, "[REDACTED]").into_owned();
             }
         }
@@ -686,10 +713,7 @@ fn parse_and_filter_sse(
 /// Resolve agent_id from Mcp-Session-Id (MCP spec).
 /// Falls back to x-agent-id header for clients that skip session management.
 /// Returns 404 if Mcp-Session-Id is present but unknown or expired.
-async fn resolve_agent(
-    sessions: &SessionStore,
-    headers: &HeaderMap,
-) -> Result<String, StatusCode> {
+async fn resolve_agent(sessions: &SessionStore, headers: &HeaderMap) -> Result<String, StatusCode> {
     if let Some(sid) = headers.get("mcp-session-id").and_then(|v| v.to_str().ok()) {
         return sessions.resolve(sid).await.ok_or(StatusCode::NOT_FOUND);
     }
@@ -731,7 +755,10 @@ mod tests {
 
     #[test]
     fn html_escape_all_special_chars() {
-        assert_eq!(html_escape("<script>&\"alert\"</script>"), "&lt;script&gt;&amp;&quot;alert&quot;&lt;/script&gt;");
+        assert_eq!(
+            html_escape("<script>&\"alert\"</script>"),
+            "&lt;script&gt;&amp;&quot;alert&quot;&lt;/script&gt;"
+        );
     }
 
     #[test]
@@ -774,7 +801,10 @@ mod tests {
 
     #[test]
     fn missing_authorization_header_fails() {
-        assert!(!check_bearer_token(Some("my-secret-token"), &HeaderMap::new()));
+        assert!(!check_bearer_token(
+            Some("my-secret-token"),
+            &HeaderMap::new()
+        ));
     }
 
     #[test]
@@ -835,13 +865,27 @@ mod tests {
     // ── parse_and_filter_sse ─────────────────────────────────────────────────
 
     fn empty_config_rx() -> watch::Receiver<Arc<LiveConfig>> {
-        let (_, rx) = watch::channel(Arc::new(LiveConfig::new(HashMap::new(), vec![], vec![], None, FilterMode::Block, None)));
+        let (_, rx) = watch::channel(Arc::new(LiveConfig::new(
+            HashMap::new(),
+            vec![],
+            vec![],
+            None,
+            FilterMode::Block,
+            None,
+        )));
         rx
     }
 
     fn config_rx_with_pattern(pattern: &str) -> watch::Receiver<Arc<LiveConfig>> {
         let re = Regex::new(pattern).unwrap();
-        let (_, rx) = watch::channel(Arc::new(LiveConfig::new(HashMap::new(), vec![re], vec![], None, FilterMode::Block, None)));
+        let (_, rx) = watch::channel(Arc::new(LiveConfig::new(
+            HashMap::new(),
+            vec![re],
+            vec![],
+            None,
+            FilterMode::Block,
+            None,
+        )));
         rx
     }
 

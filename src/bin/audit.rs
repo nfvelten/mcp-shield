@@ -6,7 +6,7 @@
 //! DURATION examples: 30s, 5m, 2h, 7d
 //! OUTCOME values:    allowed | blocked | forwarded
 
-use rusqlite::{types::Value, Connection};
+use rusqlite::{Connection, types::Value};
 use std::{
     env,
     time::{SystemTime, UNIX_EPOCH},
@@ -52,12 +52,18 @@ fn parse_args() -> Result<Opts, String> {
                 let v = args.next().ok_or("--outcome requires a value")?;
                 match v.as_str() {
                     "allowed" | "blocked" | "forwarded" => outcome = Some(v),
-                    other => return Err(format!("unknown outcome '{other}'; use allowed, blocked, or forwarded")),
+                    other => {
+                        return Err(format!(
+                            "unknown outcome '{other}'; use allowed, blocked, or forwarded"
+                        ));
+                    }
                 }
             }
             "--limit" => {
                 let v = args.next().ok_or("--limit requires a value")?;
-                limit = v.parse::<usize>().map_err(|_| format!("invalid limit '{v}'"))?;
+                limit = v
+                    .parse::<usize>()
+                    .map_err(|_| format!("invalid limit '{v}'"))?;
             }
             "--help" | "-h" => {
                 print_help();
@@ -67,7 +73,13 @@ fn parse_args() -> Result<Opts, String> {
         }
     }
 
-    Ok(Opts { db_path, agent, since_secs, outcome, limit })
+    Ok(Opts {
+        db_path,
+        agent,
+        since_secs,
+        outcome,
+        limit,
+    })
 }
 
 fn parse_duration(s: &str) -> Result<u64, String> {
@@ -177,16 +189,19 @@ fn run_query(opts: &Opts) -> anyhow::Result<()> {
 
     // ── Table ─────────────────────────────────────────────────────────────────
 
-    println!("\n{:<14} {:<16} {:<18} {:<22} {:<10} REASON", "AGE", "AGENT", "METHOD", "TOOL", "OUTCOME");
+    println!(
+        "\n{:<14} {:<16} {:<18} {:<22} {:<10} REASON",
+        "AGE", "AGENT", "METHOD", "TOOL", "OUTCOME"
+    );
     println!("{}", "─".repeat(110));
 
     for (ts, agent, method, tool, outcome, reason) in &rows {
         let age = format_age(*ts, now_ts);
         let outcome_display = match outcome.as_str() {
-            "blocked"   => format!("\x1b[31m{outcome:<10}\x1b[0m"),
-            "allowed"   => format!("\x1b[32m{outcome:<10}\x1b[0m"),
+            "blocked" => format!("\x1b[31m{outcome:<10}\x1b[0m"),
+            "allowed" => format!("\x1b[32m{outcome:<10}\x1b[0m"),
             "forwarded" => format!("{outcome:<10}"),
-            _           => format!("{outcome:<10}"),
+            _ => format!("{outcome:<10}"),
         };
         println!(
             "{:<14} {:<16} {:<18} {:<22} {} {}",
@@ -203,9 +218,15 @@ fn run_query(opts: &Opts) -> anyhow::Result<()> {
 
     // Filter summary line
     let mut filter_parts = Vec::new();
-    if let Some(a) = &opts.agent   { filter_parts.push(format!("agent={a}")); }
-    if let Some(s) = opts.since_secs { filter_parts.push(format!("since={}", format_duration(s))); }
-    if let Some(o) = &opts.outcome  { filter_parts.push(format!("outcome={o}")); }
+    if let Some(a) = &opts.agent {
+        filter_parts.push(format!("agent={a}"));
+    }
+    if let Some(s) = opts.since_secs {
+        filter_parts.push(format!("since={}", format_duration(s)));
+    }
+    if let Some(o) = &opts.outcome {
+        filter_parts.push(format!("outcome={o}"));
+    }
     let filter_str = if filter_parts.is_empty() {
         String::from("no filters")
     } else {
@@ -224,18 +245,29 @@ fn run_query(opts: &Opts) -> anyhow::Result<()> {
 
 fn format_age(ts: i64, now: i64) -> String {
     let diff = now - ts;
-    if diff < 0       { "just now".to_string() }
-    else if diff < 60 { format!("{diff}s ago") }
-    else if diff < 3600 { format!("{}m ago", diff / 60) }
-    else if diff < 86400 { format!("{}h ago", diff / 3600) }
-    else               { format!("{}d ago", diff / 86400) }
+    if diff < 0 {
+        "just now".to_string()
+    } else if diff < 60 {
+        format!("{diff}s ago")
+    } else if diff < 3600 {
+        format!("{}m ago", diff / 60)
+    } else if diff < 86400 {
+        format!("{}h ago", diff / 3600)
+    } else {
+        format!("{}d ago", diff / 86400)
+    }
 }
 
 fn format_duration(secs: u64) -> String {
-    if secs.is_multiple_of(86400) { format!("{}d", secs / 86400) }
-    else if secs.is_multiple_of(3600) { format!("{}h", secs / 3600) }
-    else if secs.is_multiple_of(60) { format!("{}m", secs / 60) }
-    else { format!("{secs}s") }
+    if secs.is_multiple_of(86400) {
+        format!("{}d", secs / 86400)
+    } else if secs.is_multiple_of(3600) {
+        format!("{}h", secs / 3600)
+    } else if secs.is_multiple_of(60) {
+        format!("{}m", secs / 60)
+    } else {
+        format!("{secs}s")
+    }
 }
 
 fn trunc(s: &str, max: usize) -> String {

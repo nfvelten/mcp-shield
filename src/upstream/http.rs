@@ -1,10 +1,10 @@
 use super::McpUpstream;
 use async_trait::async_trait;
 use reqwest::{Client, ClientBuilder};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::{
-    sync::atomic::{AtomicUsize, Ordering},
     sync::Arc,
+    sync::atomic::{AtomicUsize, Ordering},
     time::{Duration, Instant},
 };
 use tokio::sync::Mutex;
@@ -55,7 +55,10 @@ impl CircuitBreaker {
         let prev = self.failure_count.swap(0, Ordering::Relaxed);
         let mut state = self.state.lock().await;
         if !matches!(*state, CbState::Closed) {
-            tracing::info!(previous_failures = prev, "upstream recovered, circuit closed");
+            tracing::info!(
+                previous_failures = prev,
+                "upstream recovered, circuit closed"
+            );
             *state = CbState::Closed;
         }
     }
@@ -67,7 +70,11 @@ impl CircuitBreaker {
             let until = Instant::now() + Duration::from_secs(self.recovery_secs);
             *state = CbState::Open { until };
             self.failure_count.store(0, Ordering::Relaxed);
-            tracing::warn!(failures = count, recovery_secs = self.recovery_secs, "circuit opened");
+            tracing::warn!(
+                failures = count,
+                recovery_secs = self.recovery_secs,
+                "circuit opened"
+            );
         }
     }
 }

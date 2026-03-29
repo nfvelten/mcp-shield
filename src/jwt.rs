@@ -1,8 +1,7 @@
 use crate::config::JwtConfig;
 use jsonwebtoken::{
-    decode, decode_header,
+    Algorithm, DecodingKey, Validation, decode, decode_header,
     jwk::{AlgorithmParameters, JwkSet},
-    Algorithm, DecodingKey, Validation,
 };
 use serde_json::Value;
 use std::{
@@ -117,10 +116,14 @@ impl JwtValidator {
                 }
             }
 
-            let issuer = self.config.issuer.as_ref()
+            let issuer = self
+                .config
+                .issuer
+                .as_ref()
                 .ok_or_else(|| "oidc_discovery requires issuer to be set".to_string())?;
 
-            let url = oidc_discover_jwks(issuer).await
+            let url = oidc_discover_jwks(issuer)
+                .await
                 .map_err(|e| format!("OIDC discovery failed: {e}"))?;
 
             tracing::info!(issuer, jwks_url = %url, "OIDC discovery completed");
@@ -159,7 +162,10 @@ impl JwtValidator {
             serde_json::from_str(&body).map_err(|e| format!("JWKS parse failed: {e}"))?;
 
         let result = Arc::new(keys.clone());
-        *self.jwks_cache.lock().await = Some(JwksCache { keys, fetched_at: Instant::now() });
+        *self.jwks_cache.lock().await = Some(JwksCache {
+            keys,
+            fetched_at: Instant::now(),
+        });
         tracing::info!(url = %url, "JWKS refreshed");
 
         Ok(result)
@@ -204,10 +210,7 @@ async fn oidc_discover_jwks(issuer: &str) -> anyhow::Result<String> {
     );
 
     let doc: Value = timeout(JWKS_FETCH_TIMEOUT, async {
-        reqwest::get(&discovery_url)
-            .await?
-            .json::<Value>()
-            .await
+        reqwest::get(&discovery_url).await?.json::<Value>().await
     })
     .await
     .map_err(|_| anyhow::anyhow!("OIDC discovery timed out for {issuer}"))??;
@@ -228,7 +231,9 @@ pub struct MultiJwtValidator {
 
 impl MultiJwtValidator {
     pub fn new(configs: Vec<JwtConfig>) -> Self {
-        Self { validators: configs.into_iter().map(JwtValidator::new).collect() }
+        Self {
+            validators: configs.into_iter().map(JwtValidator::new).collect(),
+        }
     }
 
     /// Validate a Bearer token against all configured providers.
@@ -249,7 +254,7 @@ impl MultiJwtValidator {
 mod tests {
     use super::*;
     use crate::config::JwtConfig;
-    use jsonwebtoken::{encode, EncodingKey, Header};
+    use jsonwebtoken::{EncodingKey, Header, encode};
     use serde_json::json;
 
     const SECRET: &str = "test-secret";
@@ -272,14 +277,20 @@ mod tests {
 
     #[tokio::test]
     async fn valid_hmac_token_returns_agent_id() {
-        let token = make_token(json!({"sub": "test-agent", "exp": 9_999_999_999u64}), SECRET);
+        let token = make_token(
+            json!({"sub": "test-agent", "exp": 9_999_999_999u64}),
+            SECRET,
+        );
         let v = validator(SECRET);
         assert_eq!(v.validate(&token).await.unwrap(), "test-agent");
     }
 
     #[tokio::test]
     async fn wrong_secret_fails() {
-        let token = make_token(json!({"sub": "test-agent", "exp": 9_999_999_999u64}), SECRET);
+        let token = make_token(
+            json!({"sub": "test-agent", "exp": 9_999_999_999u64}),
+            SECRET,
+        );
         let v = validator("wrong-secret");
         assert!(v.validate(&token).await.is_err());
     }
@@ -312,7 +323,10 @@ mod tests {
             agent_claim: "agent_id".to_string(),
             ..JwtConfig::default()
         });
-        let token = make_token(json!({"agent_id": "my-agent", "exp": 9_999_999_999u64}), SECRET);
+        let token = make_token(
+            json!({"agent_id": "my-agent", "exp": 9_999_999_999u64}),
+            SECRET,
+        );
         assert_eq!(v.validate(&token).await.unwrap(), "my-agent");
     }
 
@@ -362,10 +376,19 @@ mod tests {
 
     #[tokio::test]
     async fn multi_validator_first_match_wins() {
-        let token = make_token(json!({"sub": "agent-a", "exp": 9_999_999_999u64}), "secret-a");
+        let token = make_token(
+            json!({"sub": "agent-a", "exp": 9_999_999_999u64}),
+            "secret-a",
+        );
         let mv = MultiJwtValidator::new(vec![
-            JwtConfig { secret: Some("secret-b".to_string()), ..JwtConfig::default() },
-            JwtConfig { secret: Some("secret-a".to_string()), ..JwtConfig::default() },
+            JwtConfig {
+                secret: Some("secret-b".to_string()),
+                ..JwtConfig::default()
+            },
+            JwtConfig {
+                secret: Some("secret-a".to_string()),
+                ..JwtConfig::default()
+            },
         ]);
         assert_eq!(mv.validate(&token).await.unwrap(), "agent-a");
     }
@@ -374,8 +397,14 @@ mod tests {
     async fn multi_validator_all_fail_returns_err() {
         let token = make_token(json!({"sub": "a", "exp": 9_999_999_999u64}), "other");
         let mv = MultiJwtValidator::new(vec![
-            JwtConfig { secret: Some("wrong-1".to_string()), ..JwtConfig::default() },
-            JwtConfig { secret: Some("wrong-2".to_string()), ..JwtConfig::default() },
+            JwtConfig {
+                secret: Some("wrong-1".to_string()),
+                ..JwtConfig::default()
+            },
+            JwtConfig {
+                secret: Some("wrong-2".to_string()),
+                ..JwtConfig::default()
+            },
         ]);
         assert!(mv.validate(&token).await.is_err());
     }

@@ -85,12 +85,19 @@ pub struct CircuitBreakerConfig {
 
 impl Default for CircuitBreakerConfig {
     fn default() -> Self {
-        Self { threshold: default_cb_threshold(), recovery_secs: default_cb_recovery_secs() }
+        Self {
+            threshold: default_cb_threshold(),
+            recovery_secs: default_cb_recovery_secs(),
+        }
     }
 }
 
-fn default_cb_threshold() -> usize { 5 }
-fn default_cb_recovery_secs() -> u64 { 30 }
+fn default_cb_threshold() -> usize {
+    5
+}
+fn default_cb_recovery_secs() -> u64 {
+    30
+}
 
 fn default_addr() -> String {
     "0.0.0.0:4000".to_string()
@@ -260,30 +267,36 @@ impl JwtConfig {
     pub fn with_provider_defaults(mut self) -> anyhow::Result<Self> {
         match self.provider.as_deref() {
             Some("google") => {
-                self.issuer.get_or_insert_with(|| "https://accounts.google.com".to_string());
+                self.issuer
+                    .get_or_insert_with(|| "https://accounts.google.com".to_string());
                 self.oidc_discovery = true;
             }
             Some("github-actions") => {
-                self.issuer
-                    .get_or_insert_with(|| "https://token.actions.githubusercontent.com".to_string());
+                self.issuer.get_or_insert_with(|| {
+                    "https://token.actions.githubusercontent.com".to_string()
+                });
                 self.oidc_discovery = true;
             }
             Some("auth0") => {
                 if self.issuer.is_none() {
-                    return Err(anyhow::anyhow!("provider 'auth0' requires 'issuer' to be set"));
+                    return Err(anyhow::anyhow!(
+                        "provider 'auth0' requires 'issuer' to be set"
+                    ));
                 }
                 self.oidc_discovery = true;
             }
             Some("okta") => {
                 if self.issuer.is_none() {
-                    return Err(anyhow::anyhow!("provider 'okta' requires 'issuer' to be set"));
+                    return Err(anyhow::anyhow!(
+                        "provider 'okta' requires 'issuer' to be set"
+                    ));
                 }
                 self.oidc_discovery = true;
             }
             Some(p) => {
                 return Err(anyhow::anyhow!(
                     "unknown auth provider '{p}'. Supported: google, github-actions, auth0, okta"
-                ))
+                ));
             }
             None => {}
         }
@@ -380,10 +393,18 @@ impl Config {
         // Validate tool names contain only safe characters to prevent injection.
         // '*' is allowed as a glob wildcard in allowed_tools and denied_tools patterns.
         let tool_name_re = Regex::new(r"^[a-zA-Z0-9_/.\-*]+$").unwrap();
-        let all_policies = self.agents.iter().map(|(k, v)| (k.as_str(), v))
+        let all_policies = self
+            .agents
+            .iter()
+            .map(|(k, v)| (k.as_str(), v))
             .chain(self.default_policy.as_ref().map(|p| ("default_policy", p)));
         for (agent, policy) in all_policies {
-            for tool in policy.allowed_tools.iter().flatten().chain(&policy.denied_tools) {
+            for tool in policy
+                .allowed_tools
+                .iter()
+                .flatten()
+                .chain(&policy.denied_tools)
+            {
                 if !tool_name_re.is_match(tool) {
                     return Err(anyhow::anyhow!(
                         "agent '{}': invalid tool name '{}'",
@@ -418,7 +439,10 @@ impl Config {
         }
 
         // Validate circuit breaker threshold is non-zero
-        if let TransportConfig::Http { circuit_breaker: cb, .. } = &self.transport
+        if let TransportConfig::Http {
+            circuit_breaker: cb,
+            ..
+        } = &self.transport
             && cb.threshold == 0
         {
             return Err(anyhow::anyhow!("circuit_breaker.threshold must be > 0"));
@@ -470,14 +494,18 @@ mod tests {
     #[test]
     fn tool_name_with_spaces_is_rejected() {
         let mut cfg = base();
-        cfg.agents.insert("a".to_string(), make_agent(Some(vec!["bad name"]), vec![], 60));
+        cfg.agents.insert(
+            "a".to_string(),
+            make_agent(Some(vec!["bad name"]), vec![], 60),
+        );
         assert!(cfg.validate().is_err());
     }
 
     #[test]
     fn tool_name_with_exclamation_is_rejected() {
         let mut cfg = base();
-        cfg.agents.insert("a".to_string(), make_agent(None, vec!["bad!tool"], 60));
+        cfg.agents
+            .insert("a".to_string(), make_agent(None, vec!["bad!tool"], 60));
         assert!(cfg.validate().is_err());
     }
 
@@ -486,7 +514,11 @@ mod tests {
         let mut cfg = base();
         cfg.agents.insert(
             "a".to_string(),
-            make_agent(Some(vec!["read_file", "list-dir", "tools/v2.echo"]), vec!["delete_file"], 60),
+            make_agent(
+                Some(vec!["read_file", "list-dir", "tools/v2.echo"]),
+                vec!["delete_file"],
+                60,
+            ),
         );
         assert!(cfg.validate().is_ok());
     }
@@ -503,7 +535,8 @@ mod tests {
     #[test]
     fn known_upstream_reference_passes() {
         let mut cfg = base();
-        cfg.upstreams.insert("mcp".to_string(), "http://localhost:3000/mcp".to_string());
+        cfg.upstreams
+            .insert("mcp".to_string(), "http://localhost:3000/mcp".to_string());
         let mut policy = make_agent(None, vec![], 60);
         policy.upstream = Some("mcp".to_string());
         cfg.agents.insert("a".to_string(), policy);
@@ -518,7 +551,10 @@ mod tests {
             upstream: "http://localhost:3000/mcp".to_string(),
             session_ttl_secs: 3600,
             tls: None,
-            circuit_breaker: CircuitBreakerConfig { threshold: 0, recovery_secs: 30 },
+            circuit_breaker: CircuitBreakerConfig {
+                threshold: 0,
+                recovery_secs: 30,
+            },
         };
         assert!(cfg.validate().is_err());
     }
@@ -527,9 +563,12 @@ mod tests {
 
     #[test]
     fn google_preset_sets_issuer_and_discovery() {
-        let cfg = JwtConfig { provider: Some("google".to_string()), ..JwtConfig::default() }
-            .with_provider_defaults()
-            .unwrap();
+        let cfg = JwtConfig {
+            provider: Some("google".to_string()),
+            ..JwtConfig::default()
+        }
+        .with_provider_defaults()
+        .unwrap();
         assert_eq!(cfg.issuer.as_deref(), Some("https://accounts.google.com"));
         assert!(cfg.oidc_discovery);
     }
@@ -551,7 +590,10 @@ mod tests {
 
     #[test]
     fn auth0_without_issuer_fails() {
-        let cfg = JwtConfig { provider: Some("auth0".to_string()), ..JwtConfig::default() };
+        let cfg = JwtConfig {
+            provider: Some("auth0".to_string()),
+            ..JwtConfig::default()
+        };
         assert!(cfg.with_provider_defaults().is_err());
     }
 
@@ -569,7 +611,10 @@ mod tests {
 
     #[test]
     fn unknown_provider_fails() {
-        let cfg = JwtConfig { provider: Some("magic".to_string()), ..JwtConfig::default() };
+        let cfg = JwtConfig {
+            provider: Some("magic".to_string()),
+            ..JwtConfig::default()
+        };
         assert!(cfg.with_provider_defaults().is_err());
     }
 
@@ -624,7 +669,10 @@ mod tests {
     #[test]
     fn wildcard_in_denied_tools_validation() {
         let mut cfg = base();
-        cfg.agents.insert("a".to_string(), make_agent(Some(vec!["read_*", "list_*"]), vec!["delete_*"], 60));
+        cfg.agents.insert(
+            "a".to_string(),
+            make_agent(Some(vec!["read_*", "list_*"]), vec!["delete_*"], 60),
+        );
         assert!(cfg.validate().is_ok());
     }
 }
