@@ -1,5 +1,9 @@
 # mcp-shield
 
+[![crates.io](https://img.shields.io/crates/v/mcp-shield.svg)](https://crates.io/crates/mcp-shield)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+[![CI](https://github.com/nfvelten/mcp-shield/actions/workflows/ci.yml/badge.svg)](https://github.com/nfvelten/mcp-shield/actions/workflows/ci.yml)
+
 A security proxy that sits between AI agents and MCP servers. It enforces per-agent policies before any tool call reaches the upstream server.
 
 ```
