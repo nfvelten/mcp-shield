@@ -135,6 +135,217 @@ mod tests {
             Decision::Block { .. }
         ));
     }
+
+    // ── Glob wildcards — denylist ─────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn glob_denylist_blocks_matching_tools() {
+        let mut agents = HashMap::new();
+        agents.insert("agent".to_string(), make_agent(None, vec!["write_*"], 60));
+        let mw = make_mw(agents);
+        assert!(matches!(
+            mw.check(&ctx("agent", "tools/call", Some("write_file"))).await,
+            Decision::Block { .. }
+        ));
+        assert!(matches!(
+            mw.check(&ctx("agent", "tools/call", Some("write_dir"))).await,
+            Decision::Block { .. }
+        ));
+    }
+
+    #[tokio::test]
+    async fn glob_denylist_allows_non_matching_tools() {
+        let mut agents = HashMap::new();
+        agents.insert("agent".to_string(), make_agent(None, vec!["write_*"], 60));
+        let mw = make_mw(agents);
+        assert!(matches!(
+            mw.check(&ctx("agent", "tools/call", Some("read_file"))).await,
+            Decision::Allow { .. }
+        ));
+    }
+
+    #[tokio::test]
+    async fn glob_denylist_star_blocks_all_tools() {
+        let mut agents = HashMap::new();
+        agents.insert("agent".to_string(), make_agent(None, vec!["*"], 60));
+        let mw = make_mw(agents);
+        assert!(matches!(
+            mw.check(&ctx("agent", "tools/call", Some("any_tool"))).await,
+            Decision::Block { .. }
+        ));
+    }
+
+    // ── Glob wildcards — allowlist ────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn glob_allowlist_permits_matching_tools() {
+        let mut agents = HashMap::new();
+        agents.insert(
+            "agent".to_string(),
+            make_agent(Some(vec!["read_*", "list_*"]), vec![], 60),
+        );
+        let mw = make_mw(agents);
+        assert!(matches!(
+            mw.check(&ctx("agent", "tools/call", Some("read_file"))).await,
+            Decision::Allow { .. }
+        ));
+        assert!(matches!(
+            mw.check(&ctx("agent", "tools/call", Some("list_dir"))).await,
+            Decision::Allow { .. }
+        ));
+    }
+
+    #[tokio::test]
+    async fn glob_allowlist_blocks_non_matching_tools() {
+        let mut agents = HashMap::new();
+        agents.insert(
+            "agent".to_string(),
+            make_agent(Some(vec!["read_*"]), vec![], 60),
+        );
+        let mw = make_mw(agents);
+        assert!(matches!(
+            mw.check(&ctx("agent", "tools/call", Some("write_file"))).await,
+            Decision::Block { .. }
+        ));
+        assert!(matches!(
+            mw.check(&ctx("agent", "tools/call", Some("delete_file"))).await,
+            Decision::Block { .. }
+        ));
+    }
+
+    #[tokio::test]
+    async fn glob_allowlist_star_permits_all_tools() {
+        let mut agents = HashMap::new();
+        agents.insert(
+            "agent".to_string(),
+            make_agent(Some(vec!["*"]), vec![], 60),
+        );
+        let mw = make_mw(agents);
+        assert!(matches!(
+            mw.check(&ctx("agent", "tools/call", Some("anything"))).await,
+            Decision::Allow { .. }
+        ));
+    }
+
+    #[tokio::test]
+    async fn glob_deny_overrides_glob_allowlist() {
+        // read_file is in allowlist via read_*, but also denied via read_file explicitly
+        let mut agents = HashMap::new();
+        agents.insert(
+            "agent".to_string(),
+            make_agent(Some(vec!["read_*"]), vec!["read_file"], 60),
+        );
+        let mw = make_mw(agents);
+        assert!(matches!(
+            mw.check(&ctx("agent", "tools/call", Some("read_file"))).await,
+            Decision::Block { .. }
+        ));
+        // read_dir still allowed (not denied)
+        assert!(matches!(
+            mw.check(&ctx("agent", "tools/call", Some("read_dir"))).await,
+            Decision::Allow { .. }
+        ));
+    }
+
+    // ── default_policy fallback ───────────────────────────────────────────────
+
+    fn make_mw_with_default(
+        agents: HashMap<String, crate::config::AgentPolicy>,
+        default: crate::config::AgentPolicy,
+    ) -> AuthMiddleware {
+        use crate::config::FilterMode;
+        let live = Arc::new(LiveConfig::new(
+            agents,
+            vec![],
+            vec![],
+            None,
+            FilterMode::Block,
+            Some(default),
+        ));
+        let (_, rx) = watch::channel(live);
+        AuthMiddleware::new(rx)
+    }
+
+    #[tokio::test]
+    async fn unknown_agent_falls_back_to_default_policy() {
+        // default_policy with a denylist — unknown agent should use it instead of being blocked
+        let default = make_agent(None, vec!["delete_*"], 60);
+        let mw = make_mw_with_default(HashMap::new(), default);
+
+        // allowed by default policy (not in denylist)
+        assert!(matches!(
+            mw.check(&ctx("unknown-agent", "tools/call", Some("read_file"))).await,
+            Decision::Allow { .. }
+        ));
+        // blocked by default policy denylist
+        assert!(matches!(
+            mw.check(&ctx("unknown-agent", "tools/call", Some("delete_db"))).await,
+            Decision::Block { .. }
+        ));
+    }
+
+    #[tokio::test]
+    async fn named_agent_takes_precedence_over_default_policy() {
+        let mut agents = HashMap::new();
+        // named agent only allows read_file
+        agents.insert(
+            "strict-agent".to_string(),
+            make_agent(Some(vec!["read_file"]), vec![], 60),
+        );
+        // default policy allows everything
+        let default = make_agent(Some(vec!["*"]), vec![], 60);
+        let mw = make_mw_with_default(agents, default);
+
+        // strict-agent is blocked by its own allowlist, not the permissive default
+        assert!(matches!(
+            mw.check(&ctx("strict-agent", "tools/call", Some("write_file"))).await,
+            Decision::Block { .. }
+        ));
+    }
+
+    // ── Edge cases ────────────────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn tools_call_without_tool_name_blocked() {
+        // tools/call with no tool name — unknown agent, should block
+        let mw = make_mw(HashMap::new());
+        let ctx = McpContext {
+            agent_id: "ghost".to_string(),
+            method: "tools/call".to_string(),
+            tool_name: None,
+            arguments: None,
+            client_ip: None,
+        };
+        assert!(matches!(mw.check(&ctx).await, Decision::Block { .. }));
+    }
+
+    #[tokio::test]
+    async fn block_reason_contains_tool_name() {
+        let mut agents = HashMap::new();
+        agents.insert("agent".to_string(), make_agent(None, vec!["delete_db"], 60));
+        let mw = make_mw(agents);
+        if let Decision::Block { reason, .. } = mw
+            .check(&ctx("agent", "tools/call", Some("delete_db")))
+            .await
+        {
+            assert!(reason.contains("delete_db"));
+        } else {
+            panic!("expected Block");
+        }
+    }
+
+    #[tokio::test]
+    async fn block_reason_contains_agent_name_for_unknown_agent() {
+        let mw = make_mw(HashMap::new());
+        if let Decision::Block { reason, .. } = mw
+            .check(&ctx("mystery-agent", "tools/call", Some("echo")))
+            .await
+        {
+            assert!(reason.contains("mystery-agent"));
+        } else {
+            panic!("expected Block");
+        }
+    }
 }
 
 pub struct AuthMiddleware {

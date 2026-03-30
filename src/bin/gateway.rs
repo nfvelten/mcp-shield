@@ -11,8 +11,10 @@ use mcp_shield::{
     middleware::{
         Pipeline, auth::AuthMiddleware, payload_filter::PayloadFilterMiddleware,
         rate_limit::RateLimitMiddleware,
+        schema_validation::SchemaValidationMiddleware,
     },
     prompt_injection,
+    schema_cache::SchemaCache,
     transport::{Transport, http::HttpTransport, stdio::StdioTransport},
     upstream::{McpUpstream, http::HttpUpstream},
 };
@@ -157,10 +159,14 @@ async fn main() -> anyhow::Result<()> {
         });
     }
 
+    // ── Schema cache — shared between gateway (writes) and validation middleware (reads) ──
+    let schema_cache = SchemaCache::new();
+
     // ── Pipeline — each middleware subscribes to live config ───────────────────
     let pipeline = Pipeline::new()
         .add(Arc::new(RateLimitMiddleware::new(config_rx.clone())))
         .add(Arc::new(AuthMiddleware::new(config_rx.clone())))
+        .add(Arc::new(SchemaValidationMiddleware::new(schema_cache.clone())))
         .add(Arc::new(PayloadFilterMiddleware::new(config_rx.clone())));
 
     // ── Named upstreams ────────────────────────────────────────────────────────
@@ -203,6 +209,7 @@ async fn main() -> anyhow::Result<()> {
                 audit.clone(),
                 Arc::clone(&metrics),
                 config_rx.clone(),
+                schema_cache,
             ));
             HttpTransport::new(
                 addr,
@@ -226,6 +233,7 @@ async fn main() -> anyhow::Result<()> {
                 audit.clone(),
                 Arc::clone(&metrics),
                 config_rx,
+                schema_cache,
             ));
             StdioTransport::new(server).serve(gateway).await?;
         }

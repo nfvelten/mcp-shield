@@ -1,10 +1,12 @@
 pub mod audit;
 pub mod config;
+pub mod decode;
 pub mod gateway;
 pub mod jwt;
 pub mod live_config;
 pub mod metrics;
 pub mod middleware;
 pub mod prompt_injection;
+pub mod schema_cache;
 pub mod transport;
 pub mod upstream;

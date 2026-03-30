@@ -17,6 +17,10 @@ pub const PATTERNS: &[&str] = &[
     r"(?i)(print|repeat|reveal|show|output|display)\s+(?:(?:your|the)\s+)?(system\s+prompt|initial\s+prompt|hidden\s+instructions?)",
     // Injected system message boundary
     r"(?i)\bnew\s+instructions?\s*:\s",
+    // ChatML / OpenAI special tokens (A1.4)
+    r"(?i)<\|im_start\|>|<\|im_end\|>|<\|system\|>|<\|user\|>|<\|assistant\|>",
+    // Llama / instruction-tuned model delimiters (A1.5)
+    r"\[INST\]|\[/INST\]|\[SYS\]|\[/SYS\]",
 ];
 
 #[cfg(test)]

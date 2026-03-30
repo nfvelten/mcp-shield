@@ -1,9 +1,11 @@
 use crate::{
     audit::{AuditEntry, AuditLog, Outcome},
     config::{FilterMode, tool_matches},
+    decode::matches_any_variant,
     live_config::LiveConfig,
     metrics::GatewayMetrics,
     middleware::{Decision, McpContext, Pipeline, RateLimitInfo},
+    schema_cache::SchemaCache,
     upstream::McpUpstream,
 };
 use serde_json::{Value, json};
@@ -24,6 +26,8 @@ pub struct McpGateway {
     audit: Arc<dyn AuditLog>,
     metrics: Arc<GatewayMetrics>,
     config: watch::Receiver<Arc<LiveConfig>>,
+    /// Shared with SchemaValidationMiddleware — populated on every tools/list response.
+    schema_cache: SchemaCache,
 }
 
 impl McpGateway {
@@ -34,6 +38,7 @@ impl McpGateway {
         audit: Arc<dyn AuditLog>,
         metrics: Arc<GatewayMetrics>,
         config: watch::Receiver<Arc<LiveConfig>>,
+        schema_cache: SchemaCache,
     ) -> Self {
         Self {
             pipeline,
@@ -42,6 +47,7 @@ impl McpGateway {
             audit,
             metrics,
             config,
+            schema_cache,
         }
     }
 
@@ -228,7 +234,11 @@ impl McpGateway {
         };
 
         let response = if method == "tools/list" {
-            raw_response.map(|r| self.filter_tools_response(agent_id, r))
+            raw_response.map(|r| {
+                let filtered = self.filter_tools_response(agent_id, r);
+                self.schema_cache.populate(agent_id, &filtered);
+                filtered
+            })
         } else {
             raw_response
         };
@@ -300,10 +310,10 @@ fn scrub_request_args(mut msg: Value, patterns: &[regex::Regex]) -> Value {
 /// Recursively walk a JSON value. Any `String` leaf that matches a block pattern
 /// is replaced with the literal string `"[REDACTED]"`. Returns the filtered value
 /// and a flag indicating whether anything was redacted.
-pub(crate) fn redact_value(val: Value, patterns: &[regex::Regex]) -> (Value, bool) {
+pub fn redact_value(val: Value, patterns: &[regex::Regex]) -> (Value, bool) {
     match val {
         Value::String(s) => {
-            if patterns.iter().any(|p| p.is_match(&s)) {
+            if matches_any_variant(&s, patterns) {
                 (Value::String("[REDACTED]".to_string()), true)
             } else {
                 (Value::String(s), false)
@@ -346,6 +356,7 @@ mod tests {
         live_config::LiveConfig,
         metrics::GatewayMetrics,
         middleware::Pipeline,
+        schema_cache::SchemaCache,
         upstream::McpUpstream,
     };
     use regex::Regex;
@@ -385,6 +396,7 @@ mod tests {
             Arc::new(NoopAudit),
             Arc::new(GatewayMetrics::new().unwrap()),
             rx,
+            SchemaCache::new(),
         )
     }
 
@@ -547,5 +559,172 @@ mod tests {
         let out = scrub_request_args(msg, &[re]);
         assert_eq!(out["params"]["arguments"]["user"], json!("alice"));
         assert_eq!(out["params"]["arguments"]["creds"], json!("[REDACTED]"));
+    }
+
+    // ── P6: Encoding-aware response filtering ─────────────────────────────────
+
+    #[test]
+    fn redact_value_base64_encoded_secret() {
+        use base64::Engine;
+        let re = Regex::new("private_key").unwrap();
+        // Upstream returns a Base64-encoded value containing "private_key=..."
+        let encoded =
+            base64::engine::general_purpose::STANDARD.encode("private_key=AAAABBBBCCCC");
+        let val = json!({"result": {"content": [{"text": encoded}]}});
+        let (out, changed) = redact_value(val, &[re]);
+        assert!(changed);
+        assert_eq!(out["result"]["content"][0]["text"], json!("[REDACTED]"));
+    }
+
+    #[test]
+    fn redact_value_url_encoded_secret() {
+        let re = Regex::new("private_key").unwrap();
+        let val = json!({"output": "private%5Fkey%3DAAAABBBBCCCC"});
+        let (out, changed) = redact_value(val, &[re]);
+        assert!(changed);
+        assert_eq!(out["output"], json!("[REDACTED]"));
+    }
+
+    #[test]
+    fn redact_value_double_url_encoded_secret() {
+        let re = Regex::new("private_key").unwrap();
+        // %255F = double-encoded underscore → %5F → _
+        let val = json!({"output": "private%255Fkey%253DAAAABBBBCCCC"});
+        let (out, changed) = redact_value(val, &[re]);
+        assert!(changed);
+        assert_eq!(out["output"], json!("[REDACTED]"));
+    }
+
+    #[test]
+    fn redact_value_url_safe_base64_encoded_secret() {
+        use base64::Engine;
+        let re = Regex::new("secret_token").unwrap();
+        let encoded =
+            base64::engine::general_purpose::URL_SAFE_NO_PAD.encode("secret_token=xyz123");
+        let val = json!({"blob": encoded});
+        let (out, changed) = redact_value(val, &[re]);
+        assert!(changed);
+        assert_eq!(out["blob"], json!("[REDACTED]"));
+    }
+
+    #[test]
+    fn redact_value_clean_response_untouched() {
+        let re = Regex::new("private_key").unwrap();
+        let val = json!({"result": "Hello, World!"});
+        let (out, changed) = redact_value(val.clone(), &[re]);
+        assert!(!changed);
+        assert_eq!(out, val);
+    }
+
+    #[test]
+    fn scrub_request_args_base64_encoded_secret_scrubbed() {
+        use base64::Engine;
+        let re = Regex::new("secret").unwrap();
+        let encoded = base64::engine::general_purpose::STANDARD.encode("my secret key");
+        let msg = json!({
+            "method": "tools/call",
+            "params": {"name": "send", "arguments": {"payload": encoded}}
+        });
+        let out = scrub_request_args(msg, &[re]);
+        assert_eq!(out["params"]["arguments"]["payload"], json!("[REDACTED]"));
+    }
+
+    // ── P9: Unicode evasion in responses ─────────────────────────────────────
+
+    #[test]
+    fn redact_value_fullwidth_unicode_secret() {
+        let re = Regex::new(r"(?i)secret").unwrap();
+        // "secret" in fullwidth Unicode: ｓｅｃｒｅｔ
+        let fullwidth = "\u{FF53}\u{FF45}\u{FF43}\u{FF52}\u{FF45}\u{FF54}";
+        let val = json!({"output": fullwidth});
+        let (out, changed) = redact_value(val, &[re]);
+        assert!(changed, "fullwidth 'secret' should be redacted");
+        assert_eq!(out["output"], json!("[REDACTED]"));
+    }
+
+    #[test]
+    fn redact_value_zero_width_obfuscated_secret() {
+        let re = Regex::new(r"(?i)secret").unwrap();
+        let zws = "\u{200B}";
+        let obfuscated = format!("s{zws}e{zws}c{zws}r{zws}e{zws}t");
+        let val = json!({"output": obfuscated});
+        let (out, changed) = redact_value(val, &[re]);
+        assert!(changed, "zero-width obfuscated 'secret' should be redacted");
+        assert_eq!(out["output"], json!("[REDACTED]"));
+    }
+
+    // ── DLP / Encoded Exfiltration ──────────────────────────────────────────────
+
+    #[test]
+    fn raw_aws_key_redacted() {
+        let re = Regex::new(r"AKIA[0-9A-Z]{16}").unwrap();
+        let val = json!({"content": [{"text": "Config loaded: AKIAIOSFODNN7EXAMPLE"}]});
+        let (out, changed) = redact_value(val, &[re]);
+        assert!(changed);
+        assert_eq!(out["content"][0]["text"], json!("[REDACTED]"));
+    }
+
+    #[test]
+    fn base64_github_token_redacted() {
+        let re = Regex::new(r"ghp_[A-Za-z0-9]{36,}").unwrap();
+        // base64("ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijkl")
+        let encoded = "Z2hwX0FCQ0RFRkdISUpLTE1OT1BRUlNUVVZXWFlaYWJjZGVmZ2hpamts";
+        let val = json!({"content": [{"text": encoded}]});
+        let (out, changed) = redact_value(val, &[re]);
+        assert!(changed);
+        assert_eq!(out["content"][0]["text"], json!("[REDACTED]"));
+    }
+
+    #[test]
+    fn percent_encoded_private_key_header_redacted() {
+        let re = Regex::new(r"BEGIN (RSA |EC |)PRIVATE KEY").unwrap();
+        // %2D%2D%2D%2D%2DBEGIN%20RSA%20PRIVATE%20KEY%2D%2D%2D%2D%2D
+        let val = json!({"text": "%2D%2D%2D%2D%2DBEGIN%20RSA%20PRIVATE%20KEY%2D%2D%2D%2D%2D"});
+        let (out, changed) = redact_value(val, &[re]);
+        assert!(changed);
+        assert_eq!(out["text"], json!("[REDACTED]"));
+    }
+
+    #[test]
+    fn double_base64_aws_key_redacted() {
+        use base64::Engine;
+        let re = Regex::new(r"AKIA[0-9A-Z]{16}").unwrap();
+        let inner = base64::engine::general_purpose::STANDARD.encode("AKIAIOSFODNN7EXAMPLE");
+        let outer = base64::engine::general_purpose::STANDARD.encode(&inner);
+        let val = json!({"content": [{"text": outer}]});
+        let (out, changed) = redact_value(val, &[re]);
+        assert!(changed);
+        assert_eq!(out["content"][0]["text"], json!("[REDACTED]"));
+    }
+
+    #[test]
+    fn jwt_token_redacted() {
+        let re = Regex::new(r"eyJ[A-Za-z0-9\-_]+\.[A-Za-z0-9\-_]+\.[A-Za-z0-9\-_]+").unwrap();
+        let val = json!({"text": "Token: eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJ1c2VyMTIzIiwicm9sZSI6ImFkbWluIn0.abc123signature"});
+        let (out, changed) = redact_value(val, &[re]);
+        assert!(changed);
+        assert_eq!(out["text"], json!("[REDACTED]"));
+    }
+
+    #[test]
+    fn db_connection_string_in_error_redacted() {
+        let re = Regex::new(r"(postgresql|mysql|mongodb)://[^:]+:[^@]+@").unwrap();
+        let val = json!({
+            "error": {
+                "message": "Connection failed: postgresql://admin:s3cr3t_p4ss@db.internal:5432/production"
+            }
+        });
+        let (out, changed) = redact_value(val, &[re]);
+        assert!(changed);
+        assert_eq!(out["error"]["message"], json!("[REDACTED]"));
+    }
+
+    #[test]
+    fn clean_response_not_redacted() {
+        let re = Regex::new(r"AKIA[0-9A-Z]{16}").unwrap();
+        let val = json!({"content": [{"text": "The file was read successfully. Contents: Hello, World!"}]});
+        let (out, changed) = redact_value(val.clone(), &[re]);
+        assert!(!changed);
+        assert_eq!(out, val);
     }
 }
