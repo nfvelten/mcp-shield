@@ -102,3 +102,118 @@ impl HitlStore {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn insert_shows_up_in_list() {
+        let store = HitlStore::new();
+        let (id, _rx) = store
+            .insert(
+                "agent-a".to_string(),
+                "do_thing".to_string(),
+                serde_json::Value::Null,
+            )
+            .await;
+        let list = store.list().await;
+        assert_eq!(list.len(), 1);
+        assert_eq!(list[0].id, id);
+        assert_eq!(list[0].agent_id, "agent-a");
+        assert_eq!(list[0].tool_name, "do_thing");
+    }
+
+    #[tokio::test]
+    async fn created_at_is_nonzero() {
+        let store = HitlStore::new();
+        let (_id, _rx) = store
+            .insert("a".to_string(), "t".to_string(), serde_json::Value::Null)
+            .await;
+        let list = store.list().await;
+        assert!(
+            list[0].created_at > 0,
+            "created_at should be a Unix timestamp"
+        );
+    }
+
+    #[tokio::test]
+    async fn resolve_returns_true_and_removes_entry() {
+        let store = HitlStore::new();
+        let (id, _rx) = store
+            .insert("a".to_string(), "t".to_string(), serde_json::Value::Null)
+            .await;
+        assert_eq!(store.list().await.len(), 1);
+        let ok = store.resolve(&id, ApprovalDecision::Approved).await;
+        assert!(ok, "resolve should return true for a known id");
+        assert!(
+            store.list().await.is_empty(),
+            "entry should be removed after resolve"
+        );
+    }
+
+    #[tokio::test]
+    async fn resolve_unknown_id_returns_false() {
+        let store = HitlStore::new();
+        let ok = store
+            .resolve("nonexistent-id", ApprovalDecision::Approved)
+            .await;
+        assert!(!ok, "resolve of unknown id should return false");
+    }
+
+    #[tokio::test]
+    async fn double_resolve_returns_false_second_time() {
+        let store = HitlStore::new();
+        let (id, _rx) = store
+            .insert("a".to_string(), "t".to_string(), serde_json::Value::Null)
+            .await;
+        let first = store.resolve(&id, ApprovalDecision::Approved).await;
+        let second = store.resolve(&id, ApprovalDecision::Approved).await;
+        assert!(first);
+        assert!(!second, "second resolve of same id should return false");
+    }
+
+    #[tokio::test]
+    async fn resolve_with_dropped_receiver_succeeds_silently() {
+        let store = HitlStore::new();
+        let (id, rx) = store
+            .insert("a".to_string(), "t".to_string(), serde_json::Value::Null)
+            .await;
+        drop(rx); // simulate middleware timeout dropping the receiver
+        // resolve should not panic — the send fails silently
+        let ok = store.resolve(&id, ApprovalDecision::Approved).await;
+        assert!(
+            ok,
+            "resolve should return true even when receiver was dropped"
+        );
+    }
+
+    #[tokio::test]
+    async fn concurrent_inserts_all_appear_in_list() {
+        let store = HitlStore::new();
+        let s1 = Arc::clone(&store);
+        let s2 = Arc::clone(&store);
+        let (id1, _rx1) = s1
+            .insert("a".to_string(), "t1".to_string(), serde_json::Value::Null)
+            .await;
+        let (id2, _rx2) = s2
+            .insert("b".to_string(), "t2".to_string(), serde_json::Value::Null)
+            .await;
+        let list = store.list().await;
+        assert_eq!(list.len(), 2);
+        let ids: Vec<&str> = list.iter().map(|e| e.id.as_str()).collect();
+        assert!(ids.contains(&id1.as_str()));
+        assert!(ids.contains(&id2.as_str()));
+    }
+
+    #[tokio::test]
+    async fn arguments_are_stored() {
+        let store = HitlStore::new();
+        let args = serde_json::json!({"key": "value", "n": 42});
+        let (_id, _rx) = store
+            .insert("a".to_string(), "t".to_string(), args.clone())
+            .await;
+        let list = store.list().await;
+        assert_eq!(list[0].arguments, args);
+    }
+}

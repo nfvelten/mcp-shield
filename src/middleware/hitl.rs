@@ -223,6 +223,70 @@ mod tests {
             .await;
         check.await.unwrap();
     }
+
+    #[tokio::test]
+    async fn none_arguments_stored_as_null() {
+        let store = HitlStore::new();
+        let mut agents = HashMap::new();
+        agents.insert("a".to_string(), policy(vec!["risky"], 10));
+        let mw = Arc::new(make_mw(Arc::clone(&store), agents));
+
+        // arguments: None → should be stored as JSON null
+        let check_ctx = McpContext {
+            agent_id: "a".to_string(),
+            method: "tools/call".to_string(),
+            tool_name: Some("risky".to_string()),
+            arguments: None,
+            client_ip: None,
+        };
+
+        let mw2 = Arc::clone(&mw);
+        let check = tokio::spawn(async move { mw2.check(&check_ctx).await });
+
+        for _ in 0..50 {
+            if !store.list().await.is_empty() {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        let pending = store.list().await;
+        assert_eq!(pending[0].arguments, serde_json::Value::Null);
+
+        store
+            .resolve(&pending[0].id, ApprovalDecision::Approved)
+            .await;
+        check.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn concurrent_approvals_for_same_agent() {
+        let store = HitlStore::new();
+        let mut agents = HashMap::new();
+        agents.insert("a".to_string(), policy(vec!["op1", "op2"], 10));
+        let mw = Arc::new(make_mw(Arc::clone(&store), agents));
+
+        let mw2 = Arc::clone(&mw);
+        let mw3 = Arc::clone(&mw);
+        let check1 = tokio::spawn(async move { mw2.check(&ctx("a", "op1")).await });
+        let check2 = tokio::spawn(async move { mw3.check(&ctx("a", "op2")).await });
+
+        // Wait for both to appear as pending
+        for _ in 0..100 {
+            if store.list().await.len() == 2 {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        let pending = store.list().await;
+        assert_eq!(pending.len(), 2, "both calls should be pending");
+
+        for p in &pending {
+            store.resolve(&p.id, ApprovalDecision::Approved).await;
+        }
+
+        assert!(matches!(check1.await.unwrap(), Decision::Allow { .. }));
+        assert!(matches!(check2.await.unwrap(), Decision::Allow { .. }));
+    }
 }
 
 pub struct HitlMiddleware {

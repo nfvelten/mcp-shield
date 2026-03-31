@@ -163,3 +163,149 @@ impl AuditLog for SqliteAudit {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::audit::Outcome;
+    use rusqlite::Connection;
+    use std::time::{Duration, UNIX_EPOCH};
+    use tempfile::NamedTempFile;
+
+    fn entry(outcome: Outcome) -> Arc<AuditEntry> {
+        Arc::new(AuditEntry {
+            ts: UNIX_EPOCH + Duration::from_secs(1_000_000),
+            agent_id: "agent-x".to_string(),
+            method: "tools/call".to_string(),
+            tool: Some("read_file".to_string()),
+            outcome,
+            request_id: "req-1".to_string(),
+        })
+    }
+
+    fn count_rows(path: &str) -> usize {
+        let conn = Connection::open(path).unwrap();
+        conn.query_row("SELECT COUNT(*) FROM audit_log", [], |r| r.get::<_, i64>(0))
+            .unwrap() as usize
+    }
+
+    fn fetch_outcomes(path: &str) -> Vec<String> {
+        let conn = Connection::open(path).unwrap();
+        let mut stmt = conn
+            .prepare("SELECT outcome FROM audit_log ORDER BY id")
+            .unwrap();
+        stmt.query_map([], |r| r.get::<_, String>(0))
+            .unwrap()
+            .map(|r| r.unwrap())
+            .collect()
+    }
+
+    fn fetch_reasons(path: &str) -> Vec<Option<String>> {
+        let conn = Connection::open(path).unwrap();
+        let mut stmt = conn
+            .prepare("SELECT reason FROM audit_log ORDER BY id")
+            .unwrap();
+        stmt.query_map([], |r| r.get::<_, Option<String>>(0))
+            .unwrap()
+            .map(|r| r.unwrap())
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn records_are_persisted() {
+        let f = NamedTempFile::new().unwrap();
+        let path = f.path().to_str().unwrap();
+        let audit = SqliteAudit::new(path).unwrap();
+        audit.record(entry(Outcome::Allowed));
+        audit.flush().await;
+        assert_eq!(count_rows(path), 1);
+    }
+
+    #[tokio::test]
+    async fn outcome_strings_are_correct() {
+        let f = NamedTempFile::new().unwrap();
+        let path = f.path().to_str().unwrap();
+        let audit = SqliteAudit::new(path).unwrap();
+        audit.record(entry(Outcome::Allowed));
+        audit.record(entry(Outcome::Forwarded));
+        audit.record(entry(Outcome::Shadowed));
+        audit.record(entry(Outcome::Blocked("denied".to_string())));
+        audit.flush().await;
+        let outcomes = fetch_outcomes(path);
+        assert_eq!(outcomes, ["allowed", "forwarded", "shadowed", "blocked"]);
+    }
+
+    #[tokio::test]
+    async fn null_reason_stored_for_non_blocked_outcomes() {
+        let f = NamedTempFile::new().unwrap();
+        let path = f.path().to_str().unwrap();
+        let audit = SqliteAudit::new(path).unwrap();
+        audit.record(entry(Outcome::Allowed));
+        audit.record(entry(Outcome::Forwarded));
+        audit.record(entry(Outcome::Shadowed));
+        audit.flush().await;
+        let reasons = fetch_reasons(path);
+        assert!(
+            reasons.iter().all(|r| r.is_none()),
+            "expected all NULL reasons"
+        );
+    }
+
+    #[tokio::test]
+    async fn blocked_reason_stored() {
+        let f = NamedTempFile::new().unwrap();
+        let path = f.path().to_str().unwrap();
+        let audit = SqliteAudit::new(path).unwrap();
+        audit.record(entry(Outcome::Blocked("rate limit".to_string())));
+        audit.flush().await;
+        let reasons = fetch_reasons(path);
+        assert_eq!(reasons, [Some("rate limit".to_string())]);
+    }
+
+    #[tokio::test]
+    async fn max_entries_rotation_keeps_newest() {
+        let f = NamedTempFile::new().unwrap();
+        let path = f.path().to_str().unwrap();
+        let audit = SqliteAudit::with_rotation(path, Some(3), None).unwrap();
+        for _ in 0..6 {
+            audit.record(entry(Outcome::Allowed));
+        }
+        audit.flush().await;
+        assert_eq!(count_rows(path), 3, "rotation should keep only 3 rows");
+    }
+
+    #[tokio::test]
+    async fn max_age_days_rotation_purges_old() {
+        let f = NamedTempFile::new().unwrap();
+        let path = f.path().to_str().unwrap();
+        // max_age_days: 1 — entries at UNIX_EPOCH (1970) are way older than 1 day
+        let audit = SqliteAudit::with_rotation(path, None, Some(1)).unwrap();
+        audit.record(entry(Outcome::Allowed)); // ts is 1970 — will be purged
+        audit.flush().await;
+        assert_eq!(count_rows(path), 0, "old entry should have been purged");
+    }
+
+    #[tokio::test]
+    async fn flush_is_idempotent() {
+        let f = NamedTempFile::new().unwrap();
+        let path = f.path().to_str().unwrap();
+        let audit = SqliteAudit::new(path).unwrap();
+        audit.record(entry(Outcome::Allowed));
+        audit.flush().await;
+        // Second flush should be a no-op and not panic
+        audit.flush().await;
+        assert_eq!(count_rows(path), 1);
+    }
+
+    #[tokio::test]
+    async fn multiple_entries_all_persisted() {
+        let f = NamedTempFile::new().unwrap();
+        let path = f.path().to_str().unwrap();
+        let audit = SqliteAudit::new(path).unwrap();
+        for _ in 0..10 {
+            audit.record(entry(Outcome::Forwarded));
+        }
+        audit.flush().await;
+        assert_eq!(count_rows(path), 10);
+    }
+}

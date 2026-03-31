@@ -2,6 +2,7 @@ mod common;
 
 use base64::Engine as _;
 use common::*;
+use rusqlite;
 use serde_json::{Value, json};
 use std::time::Duration;
 
@@ -1392,4 +1393,65 @@ async fn approvals_endpoint_requires_admin_token() {
         .status()
         .as_u16();
     assert_eq!(status, 401);
+}
+
+#[tokio::test]
+async fn approve_endpoint_requires_admin_token() {
+    let h = harness(HITL_CONFIG).await;
+    let status = h
+        .client
+        .post(h.url("/approvals/some-id/approve"))
+        .send()
+        .await
+        .unwrap()
+        .status()
+        .as_u16();
+    assert_eq!(status, 401);
+}
+
+#[tokio::test]
+async fn reject_endpoint_requires_admin_token() {
+    let h = harness(HITL_CONFIG).await;
+    let status = h
+        .client
+        .post(h.url("/approvals/some-id/reject"))
+        .header("content-type", "application/json")
+        .body(r#"{"reason":"test"}"#)
+        .send()
+        .await
+        .unwrap()
+        .status()
+        .as_u16();
+    assert_eq!(status, 401);
+}
+
+#[tokio::test]
+async fn shadow_mode_audit_outcome_is_shadowed() {
+    let db_path = format!("/tmp/arbit-shadow-audit-test-{}.db", std::process::id());
+    let h = harness_with_db_audit(SHADOW_CONFIG, &db_path).await;
+    let (sid, _) = h.init("shadow-agent").await;
+
+    h.json(Some(&sid), call_body("risky_write", json!({})))
+        .await;
+
+    // Give the async audit worker time to flush
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    drop(h); // flushes the gateway
+
+    // Read the SQLite DB directly
+    let conn = rusqlite::Connection::open(&db_path).unwrap();
+    let outcomes: Vec<String> = {
+        let mut stmt = conn
+            .prepare("SELECT outcome FROM audit_log WHERE tool = 'risky_write'")
+            .unwrap();
+        stmt.query_map([], |r| r.get::<_, String>(0))
+            .unwrap()
+            .map(|r| r.unwrap())
+            .collect()
+    };
+    let _ = std::fs::remove_file(&db_path);
+    assert!(
+        outcomes.iter().any(|o| o == "shadowed"),
+        "expected a 'shadowed' outcome in audit log, got: {outcomes:?}"
+    );
 }

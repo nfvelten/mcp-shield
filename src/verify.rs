@@ -219,4 +219,70 @@ mod tests {
             "unexpected error: {err}"
         );
     }
+
+    #[tokio::test]
+    async fn cosign_bundle_path_not_found_fails() {
+        // cosign may not be installed in CI, but the path to the binary is valid
+        // We test that a nonexistent bundle path causes an error from cosign,
+        // OR that cosign itself is not found on PATH — either way, an Err is returned.
+        let f = write_temp(b"hello");
+        let cfg = BinaryVerifyConfig {
+            sha256: None,
+            cosign_bundle: Some("/nonexistent/bundle.json".to_string()),
+            cosign_identity: None,
+            cosign_issuer: None,
+        };
+        let result = verify_binary(f.path().to_str().unwrap(), &cfg).await;
+        // Must fail — cosign not found or bundle missing
+        assert!(result.is_err(), "expected error for missing cosign bundle");
+    }
+
+    #[tokio::test]
+    async fn sha256_and_cosign_both_configured_sha256_runs_first() {
+        // Even with a nonexistent cosign bundle, the SHA-256 check runs first.
+        // If SHA-256 fails, we get a hash mismatch error before cosign is tried.
+        let f = write_temp(b"hello");
+        let cfg = BinaryVerifyConfig {
+            sha256: Some("deadbeef".to_string()), // wrong hash — will fail
+            cosign_bundle: Some("/some/bundle.json".to_string()),
+            cosign_identity: None,
+            cosign_issuer: None,
+        };
+        let err = verify_binary(f.path().to_str().unwrap(), &cfg)
+            .await
+            .unwrap_err();
+        // The error should be about hash mismatch, not cosign
+        assert!(
+            err.to_string().contains("hash mismatch"),
+            "expected hash mismatch error, got: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn relative_binary_name_resolved_via_path() {
+        // "sh" is almost certainly on PATH; verify it resolves without error (no sha256 check)
+        let cfg = BinaryVerifyConfig {
+            sha256: None,
+            cosign_bundle: None,
+            cosign_identity: None,
+            cosign_issuer: None,
+        };
+        // Should succeed — sh is on PATH and no checks are configured
+        verify_binary("sh", &cfg).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn absolute_path_binary_resolves_directly() {
+        let f = write_temp(b"data");
+        let cfg = BinaryVerifyConfig {
+            sha256: None,
+            cosign_bundle: None,
+            cosign_identity: None,
+            cosign_issuer: None,
+        };
+        // Absolute path to a real temp file — should pass with no checks
+        verify_binary(f.path().to_str().unwrap(), &cfg)
+            .await
+            .unwrap();
+    }
 }
