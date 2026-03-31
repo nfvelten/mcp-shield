@@ -14,8 +14,12 @@ use std::{
     sync::Arc,
     time::{Duration, SystemTime},
 };
-use tokio::sync::watch;
+use tokio::sync::{RwLock, watch};
 use uuid::Uuid;
+
+/// Per-agent federation routing table: display_name → (upstream_name, real_tool_name).
+/// Populated on every federated `tools/list` response; consulted on `tools/call`.
+type FederationRoutes = Arc<RwLock<HashMap<String, HashMap<String, (String, String)>>>>;
 
 pub struct McpGateway {
     pipeline: Pipeline,
@@ -28,6 +32,8 @@ pub struct McpGateway {
     config: watch::Receiver<Arc<LiveConfig>>,
     /// Shared with SchemaValidationMiddleware — populated on every tools/list response.
     schema_cache: SchemaCache,
+    /// Federation routing table — only relevant when `AgentPolicy::federate` is true.
+    federation_routes: FederationRoutes,
 }
 
 impl McpGateway {
@@ -48,6 +54,7 @@ impl McpGateway {
             metrics,
             config,
             schema_cache,
+            federation_routes: Arc::new(RwLock::new(HashMap::new())),
         }
     }
 
@@ -176,6 +183,81 @@ impl McpGateway {
         }
     }
 
+    /// Queries all named upstreams for their tool lists, merges the results, and stores
+    /// a routing table so subsequent `tools/call` requests can be routed correctly.
+    /// Colliding tool names (same name from ≥2 upstreams) are prefixed `<upstream>__name`.
+    async fn federated_tools_list(&self, agent_id: &str, request_id: &Value) -> Value {
+        use futures_util::future::join_all;
+
+        let futures: Vec<_> = self
+            .named_upstreams
+            .iter()
+            .map(|(name, upstream)| {
+                let name = name.clone();
+                let upstream = Arc::clone(upstream);
+                async move {
+                    let list_req = json!({
+                        "jsonrpc": "2.0", "id": 1,
+                        "method": "tools/list", "params": {}
+                    });
+                    let resp = upstream.forward(&list_req).await;
+                    (name, resp)
+                }
+            })
+            .collect();
+
+        let results = join_all(futures).await;
+
+        // Collect (upstream_name, tool_json)
+        let mut all_tools: Vec<(String, Value)> = Vec::new();
+        for (upstream_name, resp) in results {
+            if let Some(r) = resp {
+                if let Some(tools) = r["result"]["tools"].as_array() {
+                    for tool in tools {
+                        all_tools.push((upstream_name.clone(), tool.clone()));
+                    }
+                }
+            }
+        }
+
+        // Count name occurrences to detect collisions
+        let mut name_count: HashMap<String, usize> = HashMap::new();
+        for (_, tool) in &all_tools {
+            let name = tool["name"].as_str().unwrap_or("").to_string();
+            *name_count.entry(name).or_insert(0) += 1;
+        }
+
+        // Build merged list and routing table
+        let mut merged: Vec<Value> = Vec::new();
+        let mut routes: HashMap<String, (String, String)> = HashMap::new();
+
+        for (upstream_name, mut tool) in all_tools {
+            let real_name = tool["name"].as_str().unwrap_or("").to_string();
+            let display_name = if name_count.get(&real_name).copied().unwrap_or(0) > 1 {
+                format!("{}__{}", upstream_name, real_name)
+            } else {
+                real_name.clone()
+            };
+            if let Some(obj) = tool.as_object_mut() {
+                obj.insert("name".to_string(), Value::String(display_name.clone()));
+            }
+            routes.insert(display_name, (upstream_name, real_name));
+            merged.push(tool);
+        }
+
+        // Store routing table for this agent
+        self.federation_routes
+            .write()
+            .await
+            .insert(agent_id.to_string(), routes);
+
+        json!({
+            "jsonrpc": "2.0",
+            "id": request_id,
+            "result": { "tools": merged }
+        })
+    }
+
     /// Policy check + upstream forwarding + response filtering.
     /// Returns `(response, rate_limit_info, request_id)` for the HTTP transport.
     #[tracing::instrument(skip(self, msg))]
@@ -260,6 +342,69 @@ impl McpGateway {
                 .or(cfg.default_policy.as_ref())
                 .and_then(|p| p.timeout_secs)
         };
+
+        // ── Federation mode ───────────────────────────────────────────────────
+        let is_federated = {
+            let cfg = self.config.borrow();
+            cfg.agents
+                .get(agent_id)
+                .or(cfg.default_policy.as_ref())
+                .map(|p| p.federate)
+                .unwrap_or(false)
+        };
+
+        if is_federated {
+            if method == "tools/list" {
+                let federated = self.federated_tools_list(agent_id, &msg["id"]).await;
+                let filtered = self.filter_tools_response(agent_id, federated);
+                self.schema_cache.populate(agent_id, &filtered);
+                let filtered = self.filter_response(filtered);
+                return (Some(filtered), rl, request_id);
+            }
+
+            if method == "tools/call" {
+                if let Some(tool_name) = msg["params"]["name"].as_str().map(str::to_string) {
+                    let routes_guard = self.federation_routes.read().await;
+                    if let Some(agent_routes) = routes_guard.get(agent_id) {
+                        if let Some((upstream_name, real_name)) = agent_routes.get(&tool_name) {
+                            let mut rewritten = msg.clone();
+                            rewritten["params"]["name"] = Value::String(real_name.clone());
+                            let upstream = self
+                                .named_upstreams
+                                .get(upstream_name)
+                                .unwrap_or(&self.default_upstream);
+                            let forward_fut = upstream.forward(&rewritten);
+                            let raw_response = if let Some(secs) = timeout {
+                                match tokio::time::timeout(
+                                    Duration::from_secs(secs),
+                                    forward_fut,
+                                )
+                                .await
+                                {
+                                    Ok(r) => r,
+                                    Err(_) => {
+                                        tracing::warn!(
+                                            agent = agent_id,
+                                            timeout_secs = secs,
+                                            "upstream timeout (federated)"
+                                        );
+                                        Some(json!({
+                                            "jsonrpc": "2.0",
+                                            "id": msg["id"],
+                                            "error": { "code": -32603, "message": "upstream timeout" }
+                                        }))
+                                    }
+                                }
+                            } else {
+                                forward_fut.await
+                            };
+                            let response = raw_response.map(|r| self.filter_response(r));
+                            return (response, rl, request_id);
+                        }
+                    }
+                }
+            }
+        }
 
         let upstream = self.upstream_for(agent_id);
         let forward_fut = upstream.forward(&msg);
@@ -790,6 +935,7 @@ mod tests {
                 approval_required: vec![],
                 hitl_timeout_secs: 60,
                 shadow_tools,
+                federate: false,
             },
         );
         make_gw(agents, vec![])
@@ -878,6 +1024,7 @@ mod tests {
                 approval_required: vec![],
                 hitl_timeout_secs: 60,
                 shadow_tools: vec![],
+                federate: false,
             },
         );
         let live = Arc::new(LiveConfig::new(
@@ -980,6 +1127,160 @@ mod tests {
         });
         let (resp, _, _) = gw.handle("any-agent", msg, None).await;
         assert!(resp.is_none()); // NoopUpstream
+    }
+
+    // ── federation ────────────────────────────────────────────────────────────
+
+    struct ToolListUpstream {
+        tools: Vec<&'static str>,
+    }
+    #[async_trait::async_trait]
+    impl McpUpstream for ToolListUpstream {
+        async fn forward(&self, msg: &Value) -> Option<Value> {
+            if msg["method"].as_str() == Some("tools/list") {
+                let tools: Vec<Value> = self.tools.iter().map(|n| json!({"name": n})).collect();
+                Some(json!({"jsonrpc": "2.0", "id": 1, "result": {"tools": tools}}))
+            } else if msg["method"].as_str() == Some("tools/call") {
+                Some(json!({
+                    "jsonrpc": "2.0",
+                    "id": msg["id"],
+                    "result": {
+                        "content": [{"type": "text", "text": msg["params"]["name"]}]
+                    }
+                }))
+            } else {
+                None
+            }
+        }
+    }
+
+    fn make_gw_federated(tools_a: Vec<&'static str>, tools_b: Vec<&'static str>) -> McpGateway {
+        let mut agents = HashMap::new();
+        agents.insert(
+            "agent".to_string(),
+            AgentPolicy {
+                allowed_tools: None,
+                denied_tools: vec![],
+                rate_limit: 100,
+                tool_rate_limits: HashMap::new(),
+                upstream: None,
+                api_key: None,
+                timeout_secs: None,
+                approval_required: vec![],
+                hitl_timeout_secs: 60,
+                shadow_tools: vec![],
+                federate: true,
+            },
+        );
+        let live = Arc::new(LiveConfig::new(
+            agents,
+            vec![],
+            vec![],
+            None,
+            FilterMode::Block,
+            None,
+        ));
+        let (_, rx) = watch::channel(live);
+        let mut named: HashMap<String, Arc<dyn McpUpstream>> = HashMap::new();
+        named.insert("alpha".to_string(), Arc::new(ToolListUpstream { tools: tools_a }));
+        named.insert("beta".to_string(), Arc::new(ToolListUpstream { tools: tools_b }));
+        McpGateway::new(
+            Pipeline::new(),
+            Arc::new(NoopUpstream),
+            named,
+            Arc::new(NoopAudit),
+            Arc::new(GatewayMetrics::new().unwrap()),
+            rx,
+            SchemaCache::new(),
+        )
+    }
+
+    #[tokio::test]
+    async fn federated_tools_list_merges_no_collision() {
+        let gw = make_gw_federated(vec!["read_file"], vec!["query_db"]);
+        let msg = json!({"jsonrpc": "2.0", "id": 1, "method": "tools/list", "params": {}});
+        let (resp, _, _) = gw.handle("agent", msg, None).await;
+        let resp = resp.unwrap();
+        let tools: Vec<&str> = resp["result"]["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|t| t["name"].as_str().unwrap())
+            .collect();
+        // No collision → original names kept
+        assert!(tools.contains(&"read_file"), "missing read_file");
+        assert!(tools.contains(&"query_db"), "missing query_db");
+        assert_eq!(tools.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn federated_tools_list_prefixes_collisions() {
+        let gw = make_gw_federated(vec!["shared_tool", "only_a"], vec!["shared_tool", "only_b"]);
+        let msg = json!({"jsonrpc": "2.0", "id": 1, "method": "tools/list", "params": {}});
+        let (resp, _, _) = gw.handle("agent", msg, None).await;
+        let resp = resp.unwrap();
+        let tools: Vec<&str> = resp["result"]["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|t| t["name"].as_str().unwrap())
+            .collect();
+        // Colliding tool gets prefixed
+        assert!(
+            tools.iter().any(|t| *t == "alpha__shared_tool" || *t == "beta__shared_tool"),
+            "colliding tool should be prefixed; got: {tools:?}"
+        );
+        // Non-colliding tools keep their names
+        assert!(tools.contains(&"only_a"), "missing only_a");
+        assert!(tools.contains(&"only_b"), "missing only_b");
+        assert_eq!(tools.len(), 4);
+    }
+
+    #[tokio::test]
+    async fn federated_tools_call_routes_to_correct_upstream() {
+        let gw = make_gw_federated(vec!["read_file"], vec!["query_db"]);
+        // First, populate the routing table via tools/list
+        let list_msg = json!({"jsonrpc": "2.0", "id": 1, "method": "tools/list", "params": {}});
+        gw.handle("agent", list_msg, None).await;
+
+        // Call a tool that belongs to the "beta" upstream
+        let call_msg = json!({
+            "jsonrpc": "2.0", "id": 2,
+            "method": "tools/call",
+            "params": {"name": "query_db", "arguments": {}}
+        });
+        let (resp, _, _) = gw.handle("agent", call_msg, None).await;
+        let resp = resp.unwrap();
+        // ToolListUpstream echoes back the tool name it received — should be real name "query_db"
+        assert_eq!(
+            resp["result"]["content"][0]["text"],
+            "query_db",
+            "should forward real tool name to upstream"
+        );
+    }
+
+    #[tokio::test]
+    async fn federated_tools_call_routes_prefixed_collision() {
+        let gw = make_gw_federated(vec!["shared_tool"], vec!["shared_tool"]);
+        // Populate routing table
+        let list_msg = json!({"jsonrpc": "2.0", "id": 1, "method": "tools/list", "params": {}});
+        gw.handle("agent", list_msg, None).await;
+
+        // Determine one of the prefixed names (alpha or beta)
+        let prefixed = "alpha__shared_tool";
+        let call_msg = json!({
+            "jsonrpc": "2.0", "id": 2,
+            "method": "tools/call",
+            "params": {"name": prefixed, "arguments": {}}
+        });
+        let (resp, _, _) = gw.handle("agent", call_msg, None).await;
+        let resp = resp.unwrap();
+        // The upstream should have received the real name (without prefix)
+        assert_eq!(
+            resp["result"]["content"][0]["text"],
+            "shared_tool",
+            "upstream should receive stripped real name"
+        );
     }
 
     // ── upstreams_health ──────────────────────────────────────────────────────

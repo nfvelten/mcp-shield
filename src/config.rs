@@ -215,6 +215,11 @@ pub struct AgentPolicy {
     /// Supports the same glob syntax as `allowed_tools` / `denied_tools`.
     #[serde(default)]
     pub shadow_tools: Vec<String>,
+    /// When true the gateway queries ALL named upstreams for this agent, merges their tool
+    /// lists into a single view, and routes each `tools/call` to the correct upstream.
+    /// Colliding tool names are prefixed with `<upstream>__` (e.g. `filesystem__read_file`).
+    #[serde(default)]
+    pub federate: bool,
 }
 
 fn default_rate_limit() -> usize {
@@ -434,6 +439,7 @@ pub(crate) fn make_agent(
         approval_required: vec![],
         hitl_timeout_secs: 60,
         shadow_tools: vec![],
+        federate: false,
     }
 }
 

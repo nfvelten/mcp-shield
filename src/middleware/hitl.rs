@@ -26,6 +26,7 @@ mod tests {
             approval_required: approval_required.into_iter().map(String::from).collect(),
             hitl_timeout_secs: timeout_secs,
             shadow_tools: vec![],
+            federate: false,
         }
     }
 

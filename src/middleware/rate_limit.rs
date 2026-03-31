@@ -27,6 +27,7 @@ mod tests {
             approval_required: vec![],
             hitl_timeout_secs: 60,
             shadow_tools: vec![],
+            federate: false,
         }
     }
 
@@ -129,6 +130,7 @@ mod tests {
                 approval_required: vec![],
                 hitl_timeout_secs: 60,
                 shadow_tools: vec![],
+                federate: false,
             },
         );
         let mw = make_mw(agents, None);
