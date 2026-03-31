@@ -1,5 +1,14 @@
 # Changelog
 
+## [0.14.0] — 2026-03-31
+
+### Added
+- **Docker image published to GHCR**: `ghcr.io/nfvelten/arbit:<version>` built and pushed automatically on every `v*` tag via `.github/workflows/docker.yml`; multi-arch (`linux/amd64` + `linux/arm64`); layer cache backed by GitHub Actions cache
+- **`docker-compose.yml`**: healthcheck via `wget /health`, `LOG_FORMAT`/`LOG_LEVEL` env vars documented, commented example for `ARBIT_ADMIN_TOKEN` secret injection
+
+### Changed
+- **Dockerfile**: fixed binary names (`gateway`/`audit` → `arbit`); added non-root user `arbit` (uid 10001); added `wget` for healthcheck; `ENTRYPOINT ["arbit"] CMD ["start", "/app/gateway.yml"]`
+- **`.dockerignore`**: extended to exclude test fixtures, strategy docs, and extra config files
 ## [0.13.0] — 2026-03-31
 
 ### Changed

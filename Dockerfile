@@ -1,41 +1,55 @@
 # ── Build stage ───────────────────────────────────────────────────────────────
-FROM rust:1.87-slim AS builder
+# Uses musl for a fully static binary — no glibc dependency in the runtime image.
+FROM rust:alpine AS builder
+
+RUN apk add --no-cache musl-dev
 
 WORKDIR /build
 
-# Cache dependencies before copying source
+# Cache dependencies before copying source.
+# Stub binaries allow `cargo build` to cache all crate downloads and compilation
+# without re-running when only application source changes.
 COPY Cargo.toml Cargo.lock ./
 RUN mkdir -p src/bin \
-    && echo "fn main() {}" > src/bin/gateway.rs \
-    && echo "fn main() {}" > src/bin/audit.rs \
+    && echo "fn main() {}" > src/bin/arbit.rs \
     && echo "fn main() {}" > src/bin/dummy_server.rs \
     && echo "" > src/lib.rs \
-    && cargo build --release --bin gateway --bin audit \
+    && cargo build --release --bin arbit \
     && rm -rf src
 
-# Build the real binaries
+# Build the real binary
 COPY src ./src
-RUN touch src/main.rs \
-    && cargo build --release --bin gateway --bin audit
+RUN touch src/lib.rs \
+    && cargo build --release --bin arbit
 
 # ── Runtime stage ─────────────────────────────────────────────────────────────
+# Static binary + ca-certificates in a minimal image.
+# Uses debian:bookworm-slim (not scratch) to have /etc/passwd and CA certs
+# available without manual setup — simplifies Kubernetes RunAsNonRoot.
 FROM debian:bookworm-slim
 
-RUN apt-get update && apt-get install -y --no-install-recommends \
-        ca-certificates \
-    && rm -rf /var/lib/apt/lists/*
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends ca-certificates wget \
+    && rm -rf /var/lib/apt/lists/* \
+    && groupadd --gid 10001 arbit \
+    && useradd --uid 10001 --gid arbit --no-create-home --shell /sbin/nologin arbit
 
 WORKDIR /app
 
-COPY --from=builder /build/target/release/gateway /usr/local/bin/gateway
-COPY --from=builder /build/target/release/audit   /usr/local/bin/audit
+COPY --from=builder /build/target/release/arbit /usr/local/bin/arbit
 
-# Default config location — mount your own with -v
+# Default config location — override with -v or ConfigMap mount
 COPY gateway.yml /app/gateway.yml
 
 EXPOSE 4000
 
-ENV LOG_FORMAT=json
+# Run as non-root by default
+USER arbit
 
-ENTRYPOINT ["gateway"]
-CMD ["/app/gateway.yml"]
+# LOG_FORMAT=json  → structured JSON logs (recommended for log aggregators)
+# LOG_LEVEL=info   → log verbosity (debug | info | warn | error)
+ENV LOG_FORMAT=json \
+    LOG_LEVEL=info
+
+ENTRYPOINT ["arbit"]
+CMD ["start", "/app/gateway.yml"]

@@ -35,7 +35,8 @@ Agent (Cursor, Claude, etc.)
 - **Circuit breaker** — upstream failures open the circuit; automatic half-open probe after recovery timeout
 - **Health check** — `GET /health` returns upstream status; `503` when any upstream is degraded
 - **Config hot-reload** — reload on `SIGUSR1` or automatically every 30 seconds without restart
-- **Graceful shutdown** — SIGTERM and CTRL-C handled in both HTTP and stdio transports; active connections are drained, child process closed, and all audit backends flushed before exit — safe for Kubernetes `terminationGracePeriodSeconds`
+- **Container-ready** — multi-arch Docker image (`linux/amd64` + `linux/arm64`) published to `ghcr.io/nfvelten/arbit` on every release; runs as non-root (uid 10001); `LOG_FORMAT=json` structured logs; `docker-compose.yml` with healthcheck included
+- **Graceful shutdown** — SIGTERM and CTRL-C handled in both HTTP and stdio transports; active connections drained, child process closed, all audit backends flushed before exit — safe for Kubernetes `terminationGracePeriodSeconds`
 - **Secrets-safe config** — `${VAR}` interpolation in `gateway.yml` resolves env vars at startup; `ARBIT_ADMIN_TOKEN`, `ARBIT_UPSTREAM_URL`, `ARBIT_LISTEN_ADDR` override YAML values directly — compatible with Kubernetes Secrets, Vault Agent, External Secrets Operator, and any secret manager that injects env vars
 - **Cost Observability** — per-agent token estimation (4-chars-per-token heuristic); `arbit_tokens_total` Prometheus counter with `agent`/`direction` labels for chargeback dashboards; `input_tokens` stored in the SQLite audit log per request
 - **OpenLineage** — `openlineage` audit backend emits `RunEvent` (spec 2-0-2) per `tools/call`; `run.runId` correlates with `X-Request-Id`; enables LGPD/GDPR data lineage tracing ("agent X called tool Y which accessed Z")
@@ -446,6 +447,25 @@ Payload sent per `tools/call`:
 ```
 
 `eventType` is `COMPLETE` for allowed/forwarded/shadowed and `FAIL` for blocked. The `run.runId` matches the `X-Request-Id` header so lineage events can be correlated with audit log entries.
+
+## Docker
+
+```sh
+# Pull the latest image
+docker pull ghcr.io/nfvelten/arbit:latest
+
+# Run with your config file
+docker run --rm \
+  -p 4000:4000 \
+  -v $(pwd)/gateway.yml:/app/gateway.yml:ro \
+  -e ARBIT_ADMIN_TOKEN=your-secret \
+  ghcr.io/nfvelten/arbit:latest
+
+# Or with docker-compose (includes healthcheck and audit log persistence)
+docker compose up
+```
+
+Available tags: `latest`, `0.14`, `0.14.0`. Multi-arch: `linux/amd64` and `linux/arm64`.
 
 ## Usage
 
