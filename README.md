@@ -10,7 +10,7 @@ A security proxy that sits between AI agents and MCP servers. It enforces per-ag
 Agent (Cursor, Claude, etc.)
         │  JSON-RPC
         ▼
-  arbit          ← auth, rate limit, HITL, payload filter, audit
+      arbit       ← auth, rate limit, HITL, payload filter, audit
         │
         ▼
   MCP Server (filesystem, database, APIs...)
@@ -704,14 +704,14 @@ Flags:
             │   3. HitlMiddleware    ← suspend & wait  │
             │   4. SchemaValidationMiddleware          │
             │   5. PayloadFilterMiddleware             │
-            │         │                               │
-            │    Allow / Block                        │
-            │         │                               │
-            │   Shadow mode check  ← mock if matched  │
-            │         │                               │
-            │   AuditLog + Metrics                    │
-            │         │                               │
-            │    McpUpstream (per-agent)              │
+            │         │                                │
+            │    Allow / Block                         │
+            │         │                                │
+            │   Shadow mode check  ← mock if matched   │
+            │         │                                │
+            │   AuditLog + Metrics                     │
+            │         │                                │
+            │    McpUpstream (per-agent)               │
             └──────────────────────────────────────────┘
 ```
 
