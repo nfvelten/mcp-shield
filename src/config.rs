@@ -161,7 +161,20 @@ pub enum AuditConfig {
         url: String,
         /// Optional Bearer token sent in the Authorization header.
         token: Option<String>,
+        /// Emit events in CNCF CloudEvents 1.0 format.
+        /// Content-Type becomes `application/cloudevents+json`.
+        /// Enables direct ingestion by SIEMs (Splunk, Elastic, Datadog).
+        #[serde(default)]
+        cloudevents: bool,
+        /// CloudEvents `source` attribute — identifies this gateway instance.
+        /// Should be a URI-reference. Defaults to `/arbit`.
+        #[serde(default = "default_ce_source")]
+        source: String,
     },
+}
+
+fn default_ce_source() -> String {
+    "/arbit".to_string()
 }
 
 fn default_db_path() -> String {

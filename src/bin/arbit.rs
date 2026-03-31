@@ -583,9 +583,19 @@ fn build_audit_backend(cfg: &AuditConfig) -> anyhow::Result<Arc<dyn AuditLog>> {
                 *max_age_days,
             )?))
         }
-        AuditConfig::Webhook { url, token } => {
-            tracing::info!(url, "webhook audit");
-            Ok(Arc::new(WebhookAudit::new(url, token.clone())))
+        AuditConfig::Webhook {
+            url,
+            token,
+            cloudevents,
+            source,
+        } => {
+            tracing::info!(url, cloudevents, "webhook audit");
+            Ok(Arc::new(WebhookAudit::new(
+                url,
+                token.clone(),
+                *cloudevents,
+                source.clone(),
+            )))
         }
     }
 }
