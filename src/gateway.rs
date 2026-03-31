@@ -211,11 +211,9 @@ impl McpGateway {
         // Collect (upstream_name, tool_json)
         let mut all_tools: Vec<(String, Value)> = Vec::new();
         for (upstream_name, resp) in results {
-            if let Some(r) = resp {
-                if let Some(tools) = r["result"]["tools"].as_array() {
-                    for tool in tools {
-                        all_tools.push((upstream_name.clone(), tool.clone()));
-                    }
+            if let Some(tools) = resp.as_ref().and_then(|r| r["result"]["tools"].as_array()) {
+                for tool in tools {
+                    all_tools.push((upstream_name.clone(), tool.clone()));
                 }
             }
         }
@@ -362,46 +360,41 @@ impl McpGateway {
                 return (Some(filtered), rl, request_id);
             }
 
-            if method == "tools/call" {
-                if let Some(tool_name) = msg["params"]["name"].as_str().map(str::to_string) {
-                    let routes_guard = self.federation_routes.read().await;
-                    if let Some(agent_routes) = routes_guard.get(agent_id) {
-                        if let Some((upstream_name, real_name)) = agent_routes.get(&tool_name) {
-                            let mut rewritten = msg.clone();
-                            rewritten["params"]["name"] = Value::String(real_name.clone());
-                            let upstream = self
-                                .named_upstreams
-                                .get(upstream_name)
-                                .unwrap_or(&self.default_upstream);
-                            let forward_fut = upstream.forward(&rewritten);
-                            let raw_response = if let Some(secs) = timeout {
-                                match tokio::time::timeout(
-                                    Duration::from_secs(secs),
-                                    forward_fut,
-                                )
-                                .await
-                                {
-                                    Ok(r) => r,
-                                    Err(_) => {
-                                        tracing::warn!(
-                                            agent = agent_id,
-                                            timeout_secs = secs,
-                                            "upstream timeout (federated)"
-                                        );
-                                        Some(json!({
-                                            "jsonrpc": "2.0",
-                                            "id": msg["id"],
-                                            "error": { "code": -32603, "message": "upstream timeout" }
-                                        }))
-                                    }
-                                }
-                            } else {
-                                forward_fut.await
-                            };
-                            let response = raw_response.map(|r| self.filter_response(r));
-                            return (response, rl, request_id);
+            if method == "tools/call"
+                && let Some(tool_name) = msg["params"]["name"].as_str()
+            {
+                let routes_guard = self.federation_routes.read().await;
+                if let Some((upstream_name, real_name)) =
+                    routes_guard.get(agent_id).and_then(|r| r.get(tool_name))
+                {
+                    let mut rewritten = msg.clone();
+                    rewritten["params"]["name"] = Value::String(real_name.clone());
+                    let upstream = self
+                        .named_upstreams
+                        .get(upstream_name)
+                        .unwrap_or(&self.default_upstream);
+                    let forward_fut = upstream.forward(&rewritten);
+                    let raw_response = if let Some(secs) = timeout {
+                        match tokio::time::timeout(Duration::from_secs(secs), forward_fut).await {
+                            Ok(r) => r,
+                            Err(_) => {
+                                tracing::warn!(
+                                    agent = agent_id,
+                                    timeout_secs = secs,
+                                    "upstream timeout (federated)"
+                                );
+                                Some(json!({
+                                    "jsonrpc": "2.0",
+                                    "id": msg["id"],
+                                    "error": { "code": -32603, "message": "upstream timeout" }
+                                }))
+                            }
                         }
-                    }
+                    } else {
+                        forward_fut.await
+                    };
+                    let response = raw_response.map(|r| self.filter_response(r));
+                    return (response, rl, request_id);
                 }
             }
         }
@@ -1182,8 +1175,14 @@ mod tests {
         ));
         let (_, rx) = watch::channel(live);
         let mut named: HashMap<String, Arc<dyn McpUpstream>> = HashMap::new();
-        named.insert("alpha".to_string(), Arc::new(ToolListUpstream { tools: tools_a }));
-        named.insert("beta".to_string(), Arc::new(ToolListUpstream { tools: tools_b }));
+        named.insert(
+            "alpha".to_string(),
+            Arc::new(ToolListUpstream { tools: tools_a }),
+        );
+        named.insert(
+            "beta".to_string(),
+            Arc::new(ToolListUpstream { tools: tools_b }),
+        );
         McpGateway::new(
             Pipeline::new(),
             Arc::new(NoopUpstream),
@@ -1227,7 +1226,9 @@ mod tests {
             .collect();
         // Colliding tool gets prefixed
         assert!(
-            tools.iter().any(|t| *t == "alpha__shared_tool" || *t == "beta__shared_tool"),
+            tools
+                .iter()
+                .any(|t| *t == "alpha__shared_tool" || *t == "beta__shared_tool"),
             "colliding tool should be prefixed; got: {tools:?}"
         );
         // Non-colliding tools keep their names
@@ -1253,8 +1254,7 @@ mod tests {
         let resp = resp.unwrap();
         // ToolListUpstream echoes back the tool name it received — should be real name "query_db"
         assert_eq!(
-            resp["result"]["content"][0]["text"],
-            "query_db",
+            resp["result"]["content"][0]["text"], "query_db",
             "should forward real tool name to upstream"
         );
     }
@@ -1277,8 +1277,7 @@ mod tests {
         let resp = resp.unwrap();
         // The upstream should have received the real name (without prefix)
         assert_eq!(
-            resp["result"]["content"][0]["text"],
-            "shared_tool",
+            resp["result"]["content"][0]["text"], "shared_tool",
             "upstream should receive stripped real name"
         );
     }
