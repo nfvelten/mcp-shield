@@ -76,6 +76,7 @@ mod tests {
             arguments: None,
             outcome,
             request_id: "req-1".to_string(),
+            input_tokens: 0,
         })
     }
 

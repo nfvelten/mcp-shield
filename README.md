@@ -35,6 +35,7 @@ Agent (Cursor, Claude, etc.)
 - **Circuit breaker** — upstream failures open the circuit; automatic half-open probe after recovery timeout
 - **Health check** — `GET /health` returns upstream status; `503` when any upstream is degraded
 - **Config hot-reload** — reload on `SIGUSR1` or automatically every 30 seconds without restart
+- **Cost Observability** — per-agent token estimation (4-chars-per-token heuristic); `arbit_tokens_total` Prometheus counter with `agent`/`direction` labels for chargeback dashboards; `input_tokens` stored in the SQLite audit log per request
 - **Metrics** — Prometheus-compatible `/metrics` endpoint
 - **Dashboard** — `/dashboard` audit viewer with per-agent filtering
 - **TLS** — optional HTTPS with certificate and key files
@@ -575,7 +576,16 @@ arbit_requests_total{agent="cursor",outcome="allowed"} 12
 arbit_requests_total{agent="cursor",outcome="blocked"} 3
 arbit_requests_total{agent="cursor",outcome="shadowed"} 2
 arbit_requests_total{agent="claude-code",outcome="forwarded"} 8
+
+# HELP arbit_tokens_total Estimated token count processed by arbit (4-chars-per-token heuristic)
+# TYPE arbit_tokens_total counter
+arbit_tokens_total{agent="cursor",direction="input"} 1420
+arbit_tokens_total{agent="cursor",direction="output"} 3870
+arbit_tokens_total{agent="claude-code",direction="input"} 520
+arbit_tokens_total{agent="claude-code",direction="output"} 1340
 ```
+
+Use `arbit_tokens_total` for per-agent chargeback dashboards in Grafana or Datadog. The `input` direction tracks tokens sent to upstream MCP servers; `output` tracks tokens returned in responses. Both use the 4-chars-per-token heuristic — actual billing by model providers may differ.
 
 ## Health check
 

@@ -1,6 +1,7 @@
 use crate::{
     audit::{AuditEntry, AuditLog, Outcome},
     config::{FilterMode, tool_matches},
+    cost::estimate_tokens,
     decode::matches_any_variant,
     live_config::LiveConfig,
     metrics::GatewayMetrics,
@@ -126,6 +127,7 @@ impl McpGateway {
                 arguments: None,
                 outcome: Outcome::Forwarded,
                 request_id: request_id.to_string(),
+                input_tokens: 0,
             }));
             self.metrics.record(agent_id, "forwarded");
             return (None, None);
@@ -146,6 +148,8 @@ impl McpGateway {
             client_ip,
         };
 
+        let input_tokens = arguments.as_ref().map(estimate_tokens).unwrap_or(0);
+
         match self.pipeline.run(&ctx).await {
             Decision::Allow { rl } => {
                 self.audit.record(Arc::new(AuditEntry {
@@ -156,6 +160,7 @@ impl McpGateway {
                     arguments: arguments.clone(),
                     outcome: Outcome::Allowed,
                     request_id: request_id.to_string(),
+                    input_tokens,
                 }));
                 self.metrics.record(agent_id, "allowed");
                 (None, rl)
@@ -169,6 +174,7 @@ impl McpGateway {
                     arguments,
                     outcome: Outcome::Blocked(reason.clone()),
                     request_id: request_id.to_string(),
+                    input_tokens,
                 }));
                 self.metrics.record(agent_id, "blocked");
                 (
@@ -297,14 +303,17 @@ impl McpGateway {
                     tool = tool_name.as_deref().unwrap_or("-"),
                     "shadow mode: intercepted, not forwarded"
                 );
+                let shadow_args = Some(msg["params"]["arguments"].clone());
+                let shadow_input_tokens = shadow_args.as_ref().map(estimate_tokens).unwrap_or(0);
                 self.audit.record(Arc::new(AuditEntry {
                     ts: SystemTime::now(),
                     agent_id: agent_id.to_string(),
                     method: method.clone(),
                     tool: tool_name,
-                    arguments: Some(msg["params"]["arguments"].clone()),
+                    arguments: shadow_args,
                     outcome: Outcome::Shadowed,
                     request_id: request_id.clone(),
+                    input_tokens: shadow_input_tokens,
                 }));
                 self.metrics.record(agent_id, "shadowed");
                 let mock = json!({
@@ -394,6 +403,12 @@ impl McpGateway {
                         forward_fut.await
                     };
                     let response = raw_response.map(|r| self.filter_response(r));
+                    if method == "tools/call" {
+                        let input_tokens = estimate_tokens(&msg["params"]["arguments"]);
+                        let output_tokens = response.as_ref().map(estimate_tokens).unwrap_or(0);
+                        self.metrics
+                            .record_tokens(agent_id, input_tokens, output_tokens);
+                    }
                     return (response, rl, request_id);
                 }
             }
@@ -427,6 +442,12 @@ impl McpGateway {
             raw_response
         };
         let response = response.map(|r| self.filter_response(r));
+        if method == "tools/call" {
+            let input_tokens = estimate_tokens(&msg["params"]["arguments"]);
+            let output_tokens = response.as_ref().map(estimate_tokens).unwrap_or(0);
+            self.metrics
+                .record_tokens(agent_id, input_tokens, output_tokens);
+        }
         (response, rl, request_id)
     }
 

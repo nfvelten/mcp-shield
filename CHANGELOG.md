@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.10.0] — 2026-03-31
+
+### Added
+- **Cost Observability**: per-agent token estimation and chargeback tracking using the 4-chars-per-token heuristic:
+  - `arbit_tokens_total` Prometheus counter with `agent` and `direction` (`input`/`output`) labels — queryable via `/metrics` for cumulative per-agent spend
+  - `input_tokens` column added to the SQLite audit log — per-request token estimate stored alongside every `tools/call` entry; existing databases are migrated automatically
+  - `cost.rs` module with `estimate_tokens()` and `estimate_tokens_str()` utilities
+  - `GatewayMetrics::record_tokens()` method called on every forwarded `tools/call` (both regular and federated paths)
+
+---
+
 ## [0.9.0] — 2026-03-31
 
 ### Added
