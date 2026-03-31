@@ -6,6 +6,7 @@ use crate::{
     jwt::MultiJwtValidator,
     live_config::LiveConfig,
     metrics::GatewayMetrics,
+    openai_bridge::{mcp_result_to_openai, mcp_tools_to_openai, openai_tool_call_to_mcp},
 };
 use async_trait::async_trait;
 use axum::response::sse::{Event, KeepAlive, Sse};
@@ -168,6 +169,8 @@ impl Transport for HttpTransport {
             .route("/approvals", get(handle_list_approvals))
             .route("/approvals/{id}/approve", post(handle_approve))
             .route("/approvals/{id}/reject", post(handle_reject))
+            .route("/openai/v1/tools", get(handle_openai_tools))
+            .route("/openai/v1/execute", post(handle_openai_execute))
             .with_state(state);
 
         if let Some(tls) = &self.tls {
@@ -783,9 +786,102 @@ fn parse_and_filter_sse(raw: &str, config_rx: &watch::Receiver<Arc<LiveConfig>>)
     Some(Event::default().event(event_type).data(data))
 }
 
-/// Resolve agent_id from Mcp-Session-Id (MCP spec).
-/// Falls back to x-agent-id header for clients that skip session management.
-/// Returns 404 if Mcp-Session-Id is present but unknown or expired.
+// ── OpenAI bridge ─────────────────────────────────────────────────────────────
+
+/// `GET /openai/v1/tools` — returns the agent's available tools in OpenAI function format.
+///
+/// Headers:
+///   `X-Agent-Id: <agent>` or `Mcp-Session-Id: <sid>`
+async fn handle_openai_tools(
+    State(state): State<Arc<HttpState>>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+) -> impl IntoResponse {
+    let agent_id = match resolve_agent(&state.sessions, &headers).await {
+        Ok(id) => id,
+        Err(status) => return (status, Json(serde_json::Value::Null)).into_response(),
+    };
+    let client_ip = Some(peer.ip().to_string());
+
+    let list_req = serde_json::json!({
+        "jsonrpc": "2.0", "id": 1, "method": "tools/list", "params": {}
+    });
+    let (response, _, _) = state.gateway.handle(&agent_id, list_req, client_ip).await;
+
+    let tools = response
+        .as_ref()
+        .map(mcp_tools_to_openai)
+        .unwrap_or_default();
+
+    Json(serde_json::json!({ "tools": tools })).into_response()
+}
+
+/// `POST /openai/v1/execute` — execute one or more OpenAI tool calls via the MCP gateway.
+///
+/// Request body:
+/// ```json
+/// { "tool_calls": [ { "id": "call_abc", "type": "function",
+///                     "function": { "name": "...", "arguments": "{...}" } } ] }
+/// ```
+///
+/// Response body:
+/// ```json
+/// { "tool_results": [ { "role": "tool", "tool_call_id": "...", "content": "..." } ] }
+/// ```
+async fn handle_openai_execute(
+    State(state): State<Arc<HttpState>>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+    Json(body): Json<serde_json::Value>,
+) -> impl IntoResponse {
+    let agent_id = match resolve_agent(&state.sessions, &headers).await {
+        Ok(id) => id,
+        Err(status) => return (status, Json(serde_json::Value::Null)).into_response(),
+    };
+    let client_ip = Some(peer.ip().to_string());
+
+    let Some(tool_calls) = body["tool_calls"].as_array() else {
+        return (
+            StatusCode::UNPROCESSABLE_ENTITY,
+            Json(serde_json::json!({"error": "missing `tool_calls` array"})),
+        )
+            .into_response();
+    };
+
+    let mut results = Vec::new();
+    for (i, tool_call) in tool_calls.iter().enumerate() {
+        let tool_call_id = tool_call["id"].as_str().unwrap_or("").to_string();
+
+        let Some(mcp_req) = openai_tool_call_to_mcp(tool_call, i as u64 + 1) else {
+            results.push(serde_json::json!({
+                "role": "tool",
+                "tool_call_id": tool_call_id,
+                "content": "error: malformed tool call"
+            }));
+            continue;
+        };
+
+        let (response, _, _) = state
+            .gateway
+            .handle(&agent_id, mcp_req, client_ip.clone())
+            .await;
+
+        let result = response
+            .as_ref()
+            .map(|r| mcp_result_to_openai(r, &tool_call_id))
+            .unwrap_or_else(|| {
+                serde_json::json!({
+                    "role": "tool",
+                    "tool_call_id": tool_call_id,
+                    "content": ""
+                })
+            });
+        results.push(result);
+    }
+
+    Json(serde_json::json!({ "tool_results": results })).into_response()
+}
+
 async fn resolve_agent(sessions: &SessionStore, headers: &HeaderMap) -> Result<String, StatusCode> {
     if let Some(sid) = headers.get("mcp-session-id").and_then(|v| v.to_str().ok()) {
         return sessions.resolve(sid).await.ok_or(StatusCode::NOT_FOUND);
