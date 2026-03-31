@@ -17,6 +17,9 @@ pub struct AuditEntry {
     pub outcome: Outcome,
     /// Unique ID for this request — propagated as `X-Request-Id` response header.
     pub request_id: String,
+    /// Estimated tokens in the request arguments (4-chars-per-token heuristic).
+    /// Zero for non-tools/call methods.
+    pub input_tokens: u32,
 }
 
 #[derive(Clone)]

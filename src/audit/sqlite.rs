@@ -23,18 +23,23 @@ impl SqliteAudit {
         let conn = Connection::open(path)?;
         conn.execute_batch(
             "CREATE TABLE IF NOT EXISTS audit_log (
-                id        INTEGER PRIMARY KEY AUTOINCREMENT,
-                ts        INTEGER NOT NULL,
-                agent_id  TEXT    NOT NULL,
-                method    TEXT    NOT NULL,
-                tool      TEXT,
-                arguments TEXT,
-                outcome   TEXT    NOT NULL,
-                reason    TEXT
+                id           INTEGER PRIMARY KEY AUTOINCREMENT,
+                ts           INTEGER NOT NULL,
+                agent_id     TEXT    NOT NULL,
+                method       TEXT    NOT NULL,
+                tool         TEXT,
+                arguments    TEXT,
+                outcome      TEXT    NOT NULL,
+                reason       TEXT,
+                input_tokens INTEGER NOT NULL DEFAULT 0
             );",
         )?;
         // Migrate existing databases that don't have the arguments column yet.
         let _ = conn.execute_batch("ALTER TABLE audit_log ADD COLUMN arguments TEXT;");
+        // Migrate existing databases that don't have the input_tokens column yet.
+        let _ = conn.execute_batch(
+            "ALTER TABLE audit_log ADD COLUMN input_tokens INTEGER NOT NULL DEFAULT 0;",
+        );
         let conn = Arc::new(Mutex::new(conn));
         let (tx, mut rx) = mpsc::unbounded_channel::<Arc<AuditEntry>>();
 
@@ -89,8 +94,9 @@ impl SqliteAudit {
                             .as_ref()
                             .and_then(|v| serde_json::to_string(v).ok());
                         if let Err(e) = c.execute(
-                            "INSERT INTO audit_log (ts, agent_id, method, tool, arguments, outcome, reason)
-                             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                            "INSERT INTO audit_log \
+                             (ts, agent_id, method, tool, arguments, outcome, reason, input_tokens) \
+                             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
                             params![
                                 ts,
                                 entry.agent_id,
@@ -98,7 +104,8 @@ impl SqliteAudit {
                                 entry.tool,
                                 args_json,
                                 outcome_str,
-                                reason
+                                reason,
+                                entry.input_tokens as i64
                             ],
                         ) {
                             tracing::error!(
@@ -189,6 +196,7 @@ mod tests {
             arguments: Some(serde_json::json!({"path": "/tmp/foo"})),
             outcome,
             request_id: "req-1".to_string(),
+            input_tokens: 5,
         })
     }
 
@@ -316,5 +324,21 @@ mod tests {
         }
         audit.flush().await;
         assert_eq!(count_rows(path), 10);
+    }
+
+    #[tokio::test]
+    async fn input_tokens_persisted() {
+        let f = NamedTempFile::new().unwrap();
+        let path = f.path().to_str().unwrap();
+        let audit = SqliteAudit::new(path).unwrap();
+        audit.record(entry(Outcome::Allowed)); // entry has input_tokens: 5
+        audit.flush().await;
+        let conn = Connection::open(path).unwrap();
+        let tokens: i64 = conn
+            .query_row("SELECT input_tokens FROM audit_log LIMIT 1", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert_eq!(tokens, 5);
     }
 }

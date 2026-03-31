@@ -155,6 +155,7 @@ mod tests {
             arguments: None,
             outcome,
             request_id: "req-abc-123".to_string(),
+            input_tokens: 0,
         })
     }
 
