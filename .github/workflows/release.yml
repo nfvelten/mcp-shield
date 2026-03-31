@@ -56,21 +56,20 @@ jobs:
 
       - name: Build (native)
         if: '!matrix.use_cross'
-        run: cargo build --release --target ${{ matrix.target }} --bin mcp-shield --bin mcp-shield-audit
+        run: cargo build --release --target ${{ matrix.target }} --bin arbit
 
       - name: Build (cross)
         if: matrix.use_cross
-        run: cross build --release --target ${{ matrix.target }} --bin mcp-shield --bin mcp-shield-audit
+        run: cross build --release --target ${{ matrix.target }} --bin arbit
 
       - name: Package (tar.gz)
         if: matrix.archive == 'tar.gz'
         shell: bash
         run: |
           VERSION=${GITHUB_REF_NAME}
-          ARCHIVE="mcp-shield-${VERSION}-${{ matrix.target }}.tar.gz"
-          cp target/${{ matrix.target }}/release/mcp-shield .
-          cp target/${{ matrix.target }}/release/mcp-shield-audit .
-          tar czf "$ARCHIVE" mcp-shield mcp-shield-audit README.md
+          ARCHIVE="arbit-${VERSION}-${{ matrix.target }}.tar.gz"
+          cp target/${{ matrix.target }}/release/arbit .
+          tar czf "$ARCHIVE" arbit README.md
           echo "ASSET=$ARCHIVE" >> $GITHUB_ENV
 
       - name: Package (zip)
@@ -78,10 +77,9 @@ jobs:
         shell: pwsh
         run: |
           $VERSION = $env:GITHUB_REF_NAME
-          $ARCHIVE = "mcp-shield-$VERSION-${{ matrix.target }}.zip"
-          Copy-Item "target/${{ matrix.target }}/release/mcp-shield.exe" .
-          Copy-Item "target/${{ matrix.target }}/release/mcp-shield-audit.exe" .
-          Compress-Archive -Path mcp-shield.exe, mcp-shield-audit.exe, README.md -DestinationPath $ARCHIVE
+          $ARCHIVE = "arbit-$VERSION-${{ matrix.target }}.zip"
+          Copy-Item "target/${{ matrix.target }}/release/arbit.exe" .
+          Compress-Archive -Path arbit.exe, README.md -DestinationPath $ARCHIVE
           echo "ASSET=$ARCHIVE" | Out-File -FilePath $env:GITHUB_ENV -Append
 
       - uses: softprops/action-gh-release@v2
