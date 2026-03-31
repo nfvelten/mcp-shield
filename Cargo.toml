@@ -18,13 +18,10 @@ path = "src/bin/dummy_server.rs"
 
 [[bin]]
 name = "arbit"
-path = "src/bin/gateway.rs"
-
-[[bin]]
-name = "arbit-audit"
-path = "src/bin/audit.rs"
+path = "src/bin/arbit.rs"
 
 [dependencies]
+clap = { version = "4", features = ["derive"] }
 axum = "0.8"
 axum-server = { version = "0.7", features = ["tls-rustls"] }
 tokio = { version = "1", features = ["full"] }
