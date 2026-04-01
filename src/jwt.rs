@@ -202,8 +202,72 @@ impl JwtValidator {
 
 // ── OIDC discovery ────────────────────────────────────────────────────────────
 
+/// Validate that an OIDC issuer URL is safe to contact.
+///
+/// Rejects:
+/// - Non-HTTPS schemes (blocks `http://`, `file://`, etc.)
+/// - `localhost` (case-insensitive)
+/// - Loopback addresses (`127.0.0.0/8`, `::1`)
+/// - Link-local addresses (`169.254.0.0/16`, `fe80::/10`)
+/// - Private IPv4 ranges (`10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16`)
+/// - Unique-local IPv6 (`fc00::/7`)
+///
+/// Hostname-based SSRF (a public hostname that resolves to a private IP)
+/// is out of scope for this layer — use network egress controls for that.
+pub(crate) fn validate_issuer_url(issuer: &str) -> anyhow::Result<()> {
+    use std::net::IpAddr;
+
+    let url = reqwest::Url::parse(issuer)
+        .map_err(|e| anyhow::anyhow!("issuer is not a valid URL: {e}"))?;
+
+    if url.scheme() != "https" {
+        return Err(anyhow::anyhow!(
+            "issuer URL must use HTTPS, got '{}'",
+            url.scheme()
+        ));
+    }
+
+    let host = url.host_str().unwrap_or("");
+
+    if host.eq_ignore_ascii_case("localhost") {
+        return Err(anyhow::anyhow!("issuer URL must not target localhost"));
+    }
+
+    // host_str() may include brackets for IPv6 (e.g. "[::1]") — strip them.
+    let host_for_ip = host.trim_start_matches('[').trim_end_matches(']');
+
+    // Reject literal IP addresses in private / reserved ranges.
+    if let Ok(ip) = host_for_ip.parse::<IpAddr>() {
+        let blocked = match ip {
+            IpAddr::V4(a) => {
+                let o = a.octets();
+                o[0] == 127
+                    || o[0] == 10
+                    || (o[0] == 172 && (16..=31).contains(&o[1]))
+                    || (o[0] == 192 && o[1] == 168)
+                    || (o[0] == 169 && o[1] == 254)
+            }
+            IpAddr::V6(a) => {
+                let s = a.segments();
+                a.is_loopback()
+                    || (s[0] & 0xffc0) == 0xfe80  // fe80::/10 link-local
+                    || (s[0] & 0xfe00) == 0xfc00 // fc00::/7  unique-local
+            }
+        };
+        if blocked {
+            return Err(anyhow::anyhow!(
+                "issuer URL must not target a private or link-local address ({host_for_ip})"
+            ));
+        }
+    }
+
+    Ok(())
+}
+
 /// Fetch the OIDC discovery document for `issuer` and return the `jwks_uri`.
 async fn oidc_discover_jwks(issuer: &str) -> anyhow::Result<String> {
+    validate_issuer_url(issuer)?;
+
     let discovery_url = format!(
         "{}/.well-known/openid-configuration",
         issuer.trim_end_matches('/')
@@ -414,5 +478,80 @@ mod tests {
         let mv = MultiJwtValidator::new(vec![]);
         let token = make_token(json!({"sub": "a", "exp": 9_999_999_999u64}), SECRET);
         assert!(mv.validate(&token).await.is_err());
+    }
+
+    // ── validate_issuer_url ───────────────────────────────────────────────────
+
+    #[test]
+    fn valid_https_issuer_passes() {
+        assert!(validate_issuer_url("https://accounts.google.com").is_ok());
+        assert!(validate_issuer_url("https://dev-123.okta.com/oauth2/default").is_ok());
+        assert!(validate_issuer_url("https://token.actions.githubusercontent.com").is_ok());
+    }
+
+    #[test]
+    fn http_issuer_is_rejected() {
+        let err = validate_issuer_url("http://example.com").unwrap_err();
+        assert!(err.to_string().contains("HTTPS"), "{err}");
+    }
+
+    #[test]
+    fn non_url_issuer_is_rejected() {
+        assert!(validate_issuer_url("not-a-url").is_err());
+        assert!(validate_issuer_url("").is_err());
+    }
+
+    #[test]
+    fn file_scheme_is_rejected() {
+        assert!(validate_issuer_url("file:///etc/passwd").is_err());
+    }
+
+    #[test]
+    fn localhost_is_rejected() {
+        assert!(validate_issuer_url("https://localhost/.well-known/openid-configuration").is_err());
+        assert!(validate_issuer_url("https://LOCALHOST/").is_err());
+    }
+
+    #[test]
+    fn loopback_ipv4_is_rejected() {
+        assert!(validate_issuer_url("https://127.0.0.1/").is_err());
+        assert!(validate_issuer_url("https://127.1.2.3/").is_err());
+    }
+
+    #[test]
+    fn private_ipv4_ranges_are_rejected() {
+        assert!(validate_issuer_url("https://10.0.0.1/").is_err());
+        assert!(validate_issuer_url("https://172.16.0.1/").is_err());
+        assert!(validate_issuer_url("https://172.31.255.255/").is_err());
+        assert!(validate_issuer_url("https://192.168.1.1/").is_err());
+    }
+
+    #[test]
+    fn link_local_ipv4_is_rejected() {
+        // AWS instance metadata endpoint
+        assert!(validate_issuer_url("https://169.254.169.254/").is_err());
+    }
+
+    #[test]
+    fn public_ipv4_passes() {
+        // A real public IP should be allowed
+        assert!(validate_issuer_url("https://1.1.1.1/").is_ok());
+        assert!(validate_issuer_url("https://8.8.8.8/").is_ok());
+    }
+
+    #[test]
+    fn ipv6_loopback_is_rejected() {
+        assert!(validate_issuer_url("https://[::1]/").is_err());
+    }
+
+    #[test]
+    fn ipv6_link_local_is_rejected() {
+        assert!(validate_issuer_url("https://[fe80::1]/").is_err());
+    }
+
+    #[test]
+    fn ipv6_unique_local_is_rejected() {
+        assert!(validate_issuer_url("https://[fc00::1]/").is_err());
+        assert!(validate_issuer_url("https://[fd00::1]/").is_err());
     }
 }
