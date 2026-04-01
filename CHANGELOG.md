@@ -1,5 +1,6 @@
 # Changelog
 
+<<<<<<< fix/security-error-leakage
 ## [Unreleased]
 
 ### Fixed
@@ -11,6 +12,8 @@
 
 ---
 
+=======
+>>>>>>> master
 ## [0.16.0] — 2026-03-31
 
 ### Added
