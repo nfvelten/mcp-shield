@@ -167,8 +167,8 @@ async fn unknown_agent_is_blocked() {
         .await;
     let msg = body.to_string().to_lowercase();
     assert!(
-        msg.contains("unknown"),
-        "expected unknown agent error, got: {body}"
+        msg.contains("not authorized"),
+        "expected not authorized error, got: {body}"
     );
 }
 
