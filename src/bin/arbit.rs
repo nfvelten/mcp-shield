@@ -1,7 +1,11 @@
 use arbit::{
     audit::{
-        AuditLog, fanout::FanoutAudit, openlineage::OpenLineageAudit, sqlite::SqliteAudit,
-        stdout::StdoutAudit, webhook::WebhookAudit,
+        AuditLog,
+        fanout::FanoutAudit,
+        openlineage::OpenLineageAudit,
+        sqlite::{SqliteAudit, VerifyResult, verify_chain},
+        stdout::StdoutAudit,
+        webhook::WebhookAudit,
     },
     config::{AuditConfig, Config, SecretsConfig, TelemetryConfig, TransportConfig},
     env_config,
@@ -60,6 +64,12 @@ enum Command {
         /// Path to the gateway config file
         #[arg(default_value = "gateway.yml")]
         config: String,
+    },
+    /// Verify the integrity of the SQLite audit log hash chain
+    VerifyLog {
+        /// Path to the SQLite audit database
+        #[arg(default_value = "gateway-audit.db")]
+        db: String,
     },
     /// Query the SQLite audit log
     Audit {
@@ -122,7 +132,15 @@ async fn main() -> anyhow::Result<()> {
         .map(|a| {
             matches!(
                 a.as_str(),
-                "start" | "validate" | "audit" | "replay" | "--help" | "-h" | "--version" | "-V"
+                "start"
+                    | "validate"
+                    | "audit"
+                    | "replay"
+                    | "verify-log"
+                    | "--help"
+                    | "-h"
+                    | "--version"
+                    | "-V"
             )
         })
         .unwrap_or(false);
@@ -137,6 +155,7 @@ async fn main() -> anyhow::Result<()> {
         }) {
             Command::Start { config } => cmd_start(config).await,
             Command::Validate { config } => cmd_validate(config),
+            Command::VerifyLog { db } => cmd_verify_log(db),
             Command::Audit {
                 db,
                 agent,
@@ -499,6 +518,26 @@ fn cmd_validate(config_path: String) -> anyhow::Result<()> {
             eprintln!("error: {e}");
         }
         anyhow::bail!("{} error(s) found in {config_path}", errors.len())
+    }
+}
+
+// ── verify-log ─────────────────────────────────────────────────────────────────
+
+fn cmd_verify_log(db_path: String) -> anyhow::Result<()> {
+    let conn = Connection::open(&db_path)?;
+    match verify_chain(&conn)? {
+        VerifyResult::Ok { entries } => {
+            println!("OK: {entries} entries verified — audit log integrity confirmed");
+            Ok(())
+        }
+        VerifyResult::HashMismatch { row_id } => {
+            anyhow::bail!("TAMPERED: row {row_id} — stored hash does not match recomputed value")
+        }
+        VerifyResult::ChainBroken { row_id } => {
+            anyhow::bail!(
+                "TAMPERED: row {row_id} — prev_hash does not match the previous entry's hash"
+            )
+        }
     }
 }
 
