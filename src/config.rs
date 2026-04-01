@@ -20,8 +20,9 @@ pub struct Config {
     #[serde(default)]
     pub rules: Rules,
     /// Named upstream servers — agents can reference these by name via `upstream:` in their policy.
+    /// Accepts either a plain URL string (backward-compatible) or a full `UpstreamDef` object.
     #[serde(default)]
-    pub upstreams: HashMap<String, String>,
+    pub upstreams: HashMap<String, UpstreamDef>,
     /// JWT / OIDC authentication — single provider or list of providers.
     pub auth: Option<AuthConfig>,
     /// Optional Bearer token required to access `/dashboard` and `/metrics`.
@@ -283,6 +284,85 @@ pub(crate) fn tool_matches(pattern: &str, tool: &str) -> bool {
 
     // The remaining string must end with the required suffix.
     rest.ends_with(suffix)
+}
+
+// ── Named upstreams ───────────────────────────────────────────────────────────
+
+/// A named upstream entry — either a plain URL string or a full config object.
+///
+/// ```yaml
+/// # Short form (backward-compatible)
+/// upstreams:
+///   filesystem: "http://localhost:3001/mcp"
+///
+/// # Full form with OAuth 2.1 + PKCE
+/// upstreams:
+///   filesystem:
+///     url: "http://localhost:3001/mcp"
+///     oauth:
+///       client_id: "my-client"
+///       authorization_url: "https://auth.example.com/authorize"
+///       token_url: "https://auth.example.com/token"
+///       scopes: ["mcp:tools"]
+///       redirect_uri: "http://localhost:4000/oauth/callback"
+/// ```
+#[derive(Debug, Clone, Deserialize)]
+#[serde(untagged)]
+pub enum UpstreamDef {
+    /// Plain URL — e.g. `"http://localhost:3001/mcp"`
+    Url(String),
+    /// Full upstream definition with optional OAuth config.
+    Full(UpstreamFull),
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct UpstreamFull {
+    pub url: String,
+    #[serde(default)]
+    pub oauth: Option<OAuthClientConfig>,
+}
+
+/// OAuth 2.1 + PKCE client configuration for an upstream MCP server.
+///
+/// When present, arbit will obtain and manage access tokens for this upstream
+/// automatically. On first start (or after token expiry), the authorization URL
+/// is logged — the operator must visit it once to authorize arbit.
+#[derive(Debug, Clone, Deserialize)]
+pub struct OAuthClientConfig {
+    /// OAuth client ID registered with the authorization server.
+    pub client_id: String,
+    /// Client secret — omit for public clients (PKCE-only flows).
+    #[serde(default)]
+    pub client_secret: Option<String>,
+    /// Authorization endpoint, e.g. `https://auth.example.com/oauth/authorize`
+    pub authorization_url: String,
+    /// Token endpoint, e.g. `https://auth.example.com/oauth/token`
+    pub token_url: String,
+    /// OAuth scopes to request (space-separated in the URL; listed as YAML array).
+    #[serde(default)]
+    pub scopes: Vec<String>,
+    /// Redirect URI registered with the authorization server.
+    /// Must point to this gateway's `/oauth/callback` endpoint,
+    /// e.g. `http://localhost:4000/oauth/callback`.
+    pub redirect_uri: String,
+}
+
+impl UpstreamDef {
+    /// The upstream's base URL.
+    pub fn url(&self) -> &str {
+        match self {
+            UpstreamDef::Url(u) => u,
+            UpstreamDef::Full(f) => &f.url,
+        }
+    }
+
+    /// OAuth config, if present.
+    pub fn oauth(&self) -> Option<&OAuthClientConfig> {
+        match self {
+            UpstreamDef::Url(_) => None,
+            UpstreamDef::Full(f) => f.oauth.as_ref(),
+        }
+    }
 }
 
 // ── JWT / OIDC ────────────────────────────────────────────────────────────────
@@ -660,8 +740,10 @@ mod tests {
     #[test]
     fn known_upstream_reference_passes() {
         let mut cfg = base();
-        cfg.upstreams
-            .insert("mcp".to_string(), "http://localhost:3000/mcp".to_string());
+        cfg.upstreams.insert(
+            "mcp".to_string(),
+            UpstreamDef::Url("http://localhost:3000/mcp".to_string()),
+        );
         let mut policy = make_agent(None, vec![], 60);
         policy.upstream = Some("mcp".to_string());
         cfg.agents.insert("a".to_string(), policy);

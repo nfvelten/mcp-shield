@@ -9,6 +9,7 @@ pub mod jwt;
 pub mod live_config;
 pub mod metrics;
 pub mod middleware;
+pub mod oauth;
 pub mod openai_bridge;
 pub mod prompt_injection;
 pub mod schema_cache;

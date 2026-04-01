@@ -2,6 +2,9 @@
 
 ## [Unreleased]
 
+### Added
+- **OAuth 2.1 + PKCE for upstream authentication** (`oauth.rs`, `upstream/http.rs`, `transport/http.rs`): arbit can now authenticate itself to upstream MCP servers using the authorization code flow with PKCE (RFC 7636). Configure `oauth:` under a named upstream, visit the printed authorization URL once, and arbit refreshes tokens automatically. The `/oauth/callback` endpoint handles the provider redirect. Closes #3.
+
 ---
 
 ## [0.17.0] — 2026-04-01

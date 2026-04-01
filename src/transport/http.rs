@@ -6,13 +6,14 @@ use crate::{
     jwt::MultiJwtValidator,
     live_config::LiveConfig,
     metrics::GatewayMetrics,
+    oauth::OAuthManager,
     openai_bridge::{mcp_result_to_openai, mcp_tools_to_openai, openai_tool_call_to_mcp},
 };
 use async_trait::async_trait;
 use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::{
     Json, Router,
-    extract::{ConnectInfo, State},
+    extract::{ConnectInfo, Query, State},
     http::{HeaderMap, HeaderValue, StatusCode},
     response::IntoResponse,
     routing::{delete, get, post},
@@ -101,6 +102,8 @@ pub struct HttpTransport {
     /// Optional Bearer token required to access /dashboard and /metrics.
     admin_token: Option<String>,
     hitl_store: Arc<HitlStore>,
+    /// OAuth manager — handles the `/oauth/callback` endpoint for upstream auth.
+    oauth_manager: Arc<OAuthManager>,
 }
 
 impl HttpTransport {
@@ -115,6 +118,7 @@ impl HttpTransport {
         audit_db: Option<String>,
         admin_token: Option<String>,
         hitl_store: Arc<HitlStore>,
+        oauth_manager: Arc<OAuthManager>,
     ) -> Self {
         Self {
             addr: addr.into(),
@@ -126,6 +130,7 @@ impl HttpTransport {
             audit_db,
             admin_token,
             hitl_store,
+            oauth_manager,
         }
     }
 }
@@ -141,6 +146,7 @@ struct HttpState {
     /// Optional Bearer token required to access /dashboard and /metrics.
     admin_token: Option<String>,
     hitl_store: Arc<HitlStore>,
+    oauth_manager: Arc<OAuthManager>,
 }
 
 const MAX_AGENT_ID_LEN: usize = 128;
@@ -157,6 +163,7 @@ impl Transport for HttpTransport {
             audit_db: self.audit_db.clone(),
             admin_token: self.admin_token.clone(),
             hitl_store: Arc::clone(&self.hitl_store),
+            oauth_manager: Arc::clone(&self.oauth_manager),
         });
 
         let app = Router::new()
@@ -171,6 +178,7 @@ impl Transport for HttpTransport {
             .route("/approvals/{id}/reject", post(handle_reject))
             .route("/openai/v1/tools", get(handle_openai_tools))
             .route("/openai/v1/execute", post(handle_openai_execute))
+            .route("/oauth/callback", get(handle_oauth_callback))
             .with_state(state);
 
         if let Some(tls) = &self.tls {
@@ -880,6 +888,32 @@ async fn handle_openai_execute(
     }
 
     Json(serde_json::json!({ "tool_results": results })).into_response()
+}
+
+// ── OAuth callback ────────────────────────────────────────────────────────────
+
+#[derive(serde::Deserialize)]
+struct OAuthCallbackParams {
+    code: String,
+    state: String,
+}
+
+async fn handle_oauth_callback(
+    Query(params): Query<OAuthCallbackParams>,
+    State(state): State<Arc<HttpState>>,
+) -> impl IntoResponse {
+    match state
+        .oauth_manager
+        .exchange_code(&params.state, &params.code)
+        .await
+    {
+        Ok(upstream_name) => (
+            StatusCode::OK,
+            format!("Upstream '{upstream_name}' authorized. You may close this tab."),
+        )
+            .into_response(),
+        Err(e) => (StatusCode::BAD_REQUEST, format!("OAuth error: {e}")).into_response(),
+    }
 }
 
 async fn resolve_agent(sessions: &SessionStore, headers: &HeaderMap) -> Result<String, StatusCode> {

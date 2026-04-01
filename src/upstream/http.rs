@@ -1,4 +1,5 @@
 use super::McpUpstream;
+use crate::{config::OAuthClientConfig, oauth::OAuthManager};
 use async_trait::async_trait;
 use reqwest::{Client, ClientBuilder};
 use serde_json::{Value, json};
@@ -85,6 +86,9 @@ pub struct HttpUpstream {
     url: String,
     client: Client,
     cb: Arc<CircuitBreaker>,
+    /// Optional OAuth token provider — when set, a `Bearer` token is fetched
+    /// and attached to every upstream request.
+    oauth: Option<(Arc<OAuthManager>, String, OAuthClientConfig)>,
 }
 
 impl HttpUpstream {
@@ -106,7 +110,22 @@ impl HttpUpstream {
             url: url.into(),
             client,
             cb: Arc::new(CircuitBreaker::new(threshold, recovery_secs)),
+            oauth: None,
         }
+    }
+
+    /// Attach an OAuth 2.1 + PKCE token provider to this upstream.
+    pub fn with_oauth(
+        url: impl Into<String>,
+        threshold: usize,
+        recovery_secs: u64,
+        oauth_manager: Arc<OAuthManager>,
+        upstream_name: String,
+        oauth_config: OAuthClientConfig,
+    ) -> Self {
+        let mut up = Self::with_circuit_breaker(url, threshold, recovery_secs);
+        up.oauth = Some((oauth_manager, upstream_name, oauth_config));
+        up
     }
 }
 
@@ -121,7 +140,20 @@ impl McpUpstream for HttpUpstream {
             }));
         }
 
-        match self.client.post(&self.url).json(msg).send().await {
+        // Attach OAuth Bearer token if this upstream is configured with OAuth.
+        let mut req = self.client.post(&self.url).json(msg);
+        if let Some((manager, name, config)) = &self.oauth {
+            if let Some(token) = manager.get_token(name, config).await {
+                req = req.bearer_auth(token);
+            } else {
+                tracing::warn!(
+                    upstream = %name,
+                    "OAuth token unavailable — visit the authorization URL to authorize arbit"
+                );
+            }
+        }
+
+        match req.send().await {
             Ok(resp) => {
                 self.cb.on_success().await;
                 if resp.status() == reqwest::StatusCode::ACCEPTED {

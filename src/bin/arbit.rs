@@ -14,6 +14,7 @@ use arbit::{
         payload_filter::PayloadFilterMiddleware, rate_limit::RateLimitMiddleware,
         schema_validation::SchemaValidationMiddleware,
     },
+    oauth::OAuthManager,
     prompt_injection,
     schema_cache::SchemaCache,
     transport::{Transport, http::HttpTransport, stdio::StdioTransport},
@@ -297,12 +298,32 @@ async fn cmd_start(config_path: String) -> anyhow::Result<()> {
         )))
         .add(Arc::new(PayloadFilterMiddleware::new(config_rx.clone())));
 
+    // ── OAuth manager (shared between transport callback + HttpUpstream) ───────
+    let oauth_manager = Arc::new(OAuthManager::new());
+
     // ── Named upstreams ───────────────────────────────────────────────────────
     let named_upstreams: HashMap<String, Arc<dyn McpUpstream>> = config
         .upstreams
         .iter()
-        .map(|(name, url)| {
-            let upstream: Arc<dyn McpUpstream> = Arc::new(HttpUpstream::new(url));
+        .map(|(name, def)| {
+            let upstream: Arc<dyn McpUpstream> = if let Some(oauth_cfg) = def.oauth() {
+                let auth_url = oauth_manager.authorization_url(name, oauth_cfg);
+                tracing::info!(
+                    upstream = %name,
+                    url = %auth_url,
+                    "OAuth authorization required — visit the URL to authorize arbit"
+                );
+                Arc::new(HttpUpstream::with_oauth(
+                    def.url(),
+                    5,
+                    30,
+                    Arc::clone(&oauth_manager),
+                    name.clone(),
+                    oauth_cfg.clone(),
+                ))
+            } else {
+                Arc::new(HttpUpstream::new(def.url()))
+            };
             (name.clone(), upstream)
         })
         .collect();
@@ -346,6 +367,7 @@ async fn cmd_start(config_path: String) -> anyhow::Result<()> {
                 sqlite_db_path,
                 config.admin_token,
                 hitl_store,
+                oauth_manager,
             )
             .serve(gateway)
             .await?;
