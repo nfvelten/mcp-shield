@@ -15,8 +15,14 @@ use std::{
     sync::Arc,
     time::{Duration, SystemTime},
 };
-use tokio::sync::{RwLock, watch};
+use tokio::{
+    sync::{RwLock, watch},
+    time::timeout,
+};
 use uuid::Uuid;
+
+/// Maximum time to wait for all upstreams to respond during federated tools/list.
+const FEDERATION_DISCOVERY_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Per-agent federation routing table: display_name → (upstream_name, real_tool_name).
 /// Populated on every federated `tools/list` response; consulted on `tools/call`.
@@ -223,7 +229,21 @@ impl McpGateway {
             })
             .collect();
 
-        let results = join_all(futures).await;
+        let results = match timeout(FEDERATION_DISCOVERY_TIMEOUT, join_all(futures)).await {
+            Ok(r) => r,
+            Err(_) => {
+                tracing::warn!(
+                    agent = agent_id,
+                    timeout_secs = FEDERATION_DISCOVERY_TIMEOUT.as_secs(),
+                    "federated tools/list timed out"
+                );
+                return json!({
+                    "jsonrpc": "2.0",
+                    "id": request_id,
+                    "error": { "code": -32603, "message": "federated tools/list timed out" }
+                });
+            }
+        };
 
         // Collect (upstream_name, tool_json)
         let mut all_tools: Vec<(String, Value)> = Vec::new();
@@ -1382,6 +1402,83 @@ mod tests {
     }
 
     // ── upstreams_health ──────────────────────────────────────────────────────
+
+    // ── federated_tools_list timeout ─────────────────────────────────────────
+
+    /// An upstream that never responds — used to trigger the federation timeout.
+    struct HangingUpstream;
+    #[async_trait::async_trait]
+    impl McpUpstream for HangingUpstream {
+        async fn forward(&self, _: &Value) -> Option<Value> {
+            std::future::pending::<Option<Value>>().await
+        }
+    }
+
+    #[tokio::test]
+    async fn federated_tools_list_times_out_with_error() {
+        use tokio::time::{self, Duration};
+        // Shorten the constant so the test finishes quickly.
+        // We do this by pointing to a gateway with a hanging upstream and
+        // overriding the runtime timeout via time::pause + advance.
+        time::pause();
+
+        let mut agents = HashMap::new();
+        agents.insert(
+            "agent".to_string(),
+            AgentPolicy {
+                allowed_tools: None,
+                denied_tools: vec![],
+                rate_limit: 100,
+                tool_rate_limits: HashMap::new(),
+                upstream: None,
+                api_key: None,
+                timeout_secs: None,
+                approval_required: vec![],
+                hitl_timeout_secs: 60,
+                shadow_tools: vec![],
+                federate: true,
+            },
+        );
+        let live = Arc::new(LiveConfig::new(
+            agents,
+            vec![],
+            vec![],
+            None,
+            FilterMode::Block,
+            None,
+        ));
+        let (_, rx) = watch::channel(live);
+        let mut named_map: HashMap<String, Arc<dyn McpUpstream>> = HashMap::new();
+        named_map.insert("hanging".to_string(), Arc::new(HangingUpstream));
+
+        let gw = McpGateway::new(
+            Pipeline::new(),
+            Arc::new(NoopUpstream),
+            named_map,
+            Arc::new(NoopAudit),
+            Arc::new(GatewayMetrics::new().unwrap()),
+            rx,
+            SchemaCache::new(),
+        );
+
+        let request_id = json!(99);
+        let fut = gw.federated_tools_list("agent", &request_id);
+
+        // Advance time past the federation timeout
+        let result = tokio::select! {
+            r = fut => r,
+            _ = async {
+                time::advance(FEDERATION_DISCOVERY_TIMEOUT + Duration::from_millis(1)).await;
+                std::future::pending::<()>().await
+            } => unreachable!(),
+        };
+
+        assert!(
+            result["error"].is_object(),
+            "timed-out federation should return a JSON-RPC error, got: {result}"
+        );
+        assert_eq!(result["id"], json!(99));
+    }
 
     #[tokio::test]
     async fn upstreams_health_includes_default() {
