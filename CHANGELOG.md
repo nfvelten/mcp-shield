@@ -4,6 +4,9 @@
 
 ### Fixed
 - **Hot-reload preserves running config on invalid `gateway.yml`**: if `Config::from_file` returns any error (syntax, I/O, unknown fields), the watch channel is not updated and the previous config remains active. The error is logged via `tracing::error!` with the message `"config reload failed — keeping previous config"`. The new `arbit_config_reload_failures_total` Prometheus counter is incremented on each failure for alerting. Closes #35.
+## [Unreleased]
+
+### Fixed
 - **Blocked notifications no longer receive a JSON-RPC response** (`McpGateway`): JSON-RPC 2.0 §4 requires the server to remain silent when blocking a notification (request without `id`). Previously a `-32603` error was sent anyway, breaking strict-compliant MCP clients. The block decision is still recorded in the audit log. Closes #34.
 
 ### Security

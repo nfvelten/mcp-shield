@@ -452,7 +452,18 @@ Payload sent per `tools/call`:
 ## Helm
 
 ```sh
-# Install with defaults (points upstream to $ARBIT_UPSTREAM_URL)
+# Add the Helm repository
+helm repo add arbit https://nfvelten.github.io/arbit
+helm repo update
+
+# Install from the repo
+helm install arbit arbit/arbit \
+  --set env[0].name=ARBIT_UPSTREAM_URL \
+  --set env[0].value=http://mcp-server:3000/mcp
+```
+
+```sh
+# Install with defaults (points upstream to $ARBIT_UPSTREAM_URL) — local chart
 helm install arbit ./charts/arbit \
   --set env[0].name=ARBIT_UPSTREAM_URL \
   --set env[0].value=http://mcp-server:3000/mcp

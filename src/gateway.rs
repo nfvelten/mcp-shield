@@ -177,6 +177,17 @@ impl McpGateway {
                     input_tokens,
                 }));
                 self.metrics.record(agent_id, "blocked");
+                // JSON-RPC 2.0 §4: the server MUST NOT reply to a Notification
+                // (a request without an "id" member). Absent "id" serialises as
+                // Value::Null in serde_json, so we use is_null() as the check.
+                if id.is_null() {
+                    tracing::debug!(
+                        agent = agent_id,
+                        reason = %reason,
+                        "notification blocked — no response sent (JSON-RPC 2.0 §4)"
+                    );
+                    return (None, rl);
+                }
                 (
                     Some(json!({
                         "jsonrpc": "2.0",
@@ -1301,6 +1312,73 @@ mod tests {
             resp["result"]["content"][0]["text"], "shared_tool",
             "upstream should receive stripped real name"
         );
+    }
+
+    // ── JSON-RPC 2.0 §4: no response to blocked notifications ─────────────────
+
+    /// Build a gateway whose pipeline contains `AuthMiddleware`.
+    /// Unknown agents → `Decision::Block`, which exercises the notification path.
+    fn make_gw_with_auth_pipeline() -> McpGateway {
+        use crate::middleware::auth::AuthMiddleware;
+        // Empty agents map: every agent is unknown → AuthMiddleware blocks tools/call.
+        let live = Arc::new(LiveConfig::new(
+            HashMap::new(),
+            vec![],
+            vec![],
+            None,
+            FilterMode::Block,
+            None,
+        ));
+        let (_, rx) = watch::channel(Arc::clone(&live));
+        let pipeline = Pipeline::new().add(Arc::new(AuthMiddleware::new(rx.clone())));
+        McpGateway::new(
+            pipeline,
+            Arc::new(NoopUpstream),
+            HashMap::new(),
+            Arc::new(NoopAudit),
+            Arc::new(GatewayMetrics::new().unwrap()),
+            rx,
+            SchemaCache::new(),
+        )
+    }
+
+    #[tokio::test]
+    async fn blocked_notification_returns_no_response() {
+        // A tools/call without an "id" is a JSON-RPC 2.0 notification.
+        // Even when blocked, the gateway MUST NOT send a response (spec §4).
+        let gw = make_gw_with_auth_pipeline();
+        let notification = json!({
+            "jsonrpc": "2.0",
+            "method": "tools/call",
+            "params": {"name": "delete_file", "arguments": {}}
+            // no "id" field
+        });
+        let (resp, _rl) = gw
+            .intercept_with_ip("unknown-agent", &notification, None, "req-notif-1")
+            .await;
+        assert!(
+            resp.is_none(),
+            "gateway must not reply to a blocked notification, got: {resp:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn blocked_request_with_id_returns_error_response() {
+        // A tools/call WITH an "id" is a regular request — blocked requests must
+        // return a JSON-RPC error to the caller.
+        let gw = make_gw_with_auth_pipeline();
+        let request = json!({
+            "jsonrpc": "2.0",
+            "id": 42,
+            "method": "tools/call",
+            "params": {"name": "delete_file", "arguments": {}}
+        });
+        let (resp, _rl) = gw
+            .intercept_with_ip("unknown-agent", &request, None, "req-1")
+            .await;
+        let resp = resp.expect("blocked regular request must produce an error response");
+        assert_eq!(resp["id"], json!(42));
+        assert!(resp["error"].is_object());
     }
 
     // ── upstreams_health ──────────────────────────────────────────────────────

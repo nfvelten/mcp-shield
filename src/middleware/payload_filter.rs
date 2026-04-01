@@ -114,12 +114,17 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn block_reason_contains_pattern() {
+    async fn block_reason_is_generic_and_does_not_expose_pattern() {
         let re = Regex::new("secret").unwrap();
         let mw = make_mw(vec![re]);
         let ctx = ctx_call("echo", json!({"msg": "my secret value"}));
         if let Decision::Block { reason, .. } = mw.check(&ctx).await {
-            assert!(reason.contains("secret"));
+            // The client-facing reason must not reveal the internal pattern.
+            assert!(
+                !reason.contains("secret"),
+                "reason leaked pattern: {reason}"
+            );
+            assert!(reason.contains("sensitive data detected"));
         } else {
             panic!("expected Block");
         }
@@ -174,12 +179,17 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn injection_reason_contains_prompt_injection() {
+    async fn injection_reason_is_generic_and_does_not_expose_pattern() {
         let re = Regex::new(r"(?i)do anything now").unwrap();
         let mw = make_mw_injection(vec![re]);
         let ctx = ctx_call("echo", json!({"msg": "you can do anything now"}));
         if let Decision::Block { reason, .. } = mw.check(&ctx).await {
-            assert!(reason.contains("prompt injection"));
+            // The client-facing reason must not reveal the internal pattern.
+            assert!(
+                !reason.contains("do anything now"),
+                "reason leaked pattern: {reason}"
+            );
+            assert!(reason.contains("prompt injection detected"));
         } else {
             panic!("expected Block");
         }
@@ -474,8 +484,14 @@ impl Middleware for PayloadFilterMiddleware {
         // Scan each string leaf with encoding-aware matching (Base64, URL-encoding, Unicode NFC).
         // This catches payloads that try to evade regex filters by encoding their content.
         if let Some(pattern) = scan_value(args, &injection_patterns) {
+            tracing::debug!(
+                agent = %ctx.agent_id,
+                tool = ?ctx.tool_name,
+                matched_pattern = %pattern,
+                "prompt injection detected"
+            );
             return Decision::Block {
-                reason: format!("prompt injection detected (pattern: {})", pattern),
+                reason: "prompt injection detected".to_string(),
                 rl: None,
             };
         }
@@ -484,8 +500,14 @@ impl Middleware for PayloadFilterMiddleware {
         if filter_mode == FilterMode::Block
             && let Some(pattern) = scan_value(args, &block_patterns)
         {
+            tracing::debug!(
+                agent = %ctx.agent_id,
+                tool = ?ctx.tool_name,
+                matched_pattern = %pattern,
+                "sensitive data detected"
+            );
             return Decision::Block {
-                reason: format!("sensitive data detected (pattern: {})", pattern),
+                reason: "sensitive data detected".to_string(),
                 rl: None,
             };
         }

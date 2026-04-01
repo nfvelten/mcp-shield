@@ -31,16 +31,17 @@ pub async fn free_port() -> u16 {
 }
 
 pub async fn wait_for_port(port: u16) {
+    let client = reqwest::Client::new();
+    let url = format!("http://127.0.0.1:{port}/health");
     for _ in 0..100 {
-        if tokio::net::TcpStream::connect(("127.0.0.1", port))
-            .await
-            .is_ok()
-        {
-            return;
+        if let Ok(resp) = client.get(&url).send().await {
+            if resp.status().is_success() {
+                return;
+            }
         }
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
-    panic!("port {port} never became available");
+    panic!("gateway on port {port} never became healthy");
 }
 
 // ── In-process dummy MCP server ───────────────────────────────────────────────

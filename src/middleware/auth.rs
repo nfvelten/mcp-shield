@@ -346,13 +346,19 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn block_reason_contains_agent_name_for_unknown_agent() {
+    async fn block_reason_for_unknown_agent_is_generic() {
+        // The client-facing reason must not reveal whether the agent exists,
+        // preventing enumeration of valid agent IDs via error messages.
         let mw = make_mw(HashMap::new());
         if let Decision::Block { reason, .. } = mw
             .check(&ctx("mystery-agent", "tools/call", Some("echo")))
             .await
         {
-            assert!(reason.contains("mystery-agent"));
+            assert!(
+                !reason.contains("mystery-agent"),
+                "reason leaked agent name: {reason}"
+            );
+            assert_eq!(reason, "not authorized");
         } else {
             panic!("expected Block");
         }
@@ -387,8 +393,9 @@ impl Middleware for AuthMiddleware {
             .get(&ctx.agent_id)
             .or(cfg.default_policy.as_ref())
         else {
+            tracing::debug!(agent = %ctx.agent_id, "agent not found in configuration");
             return Decision::Block {
-                reason: format!("unknown agent '{}'", ctx.agent_id),
+                reason: "not authorized".to_string(),
                 rl: None,
             };
         };
