@@ -1,4 +1,5 @@
 use super::{AuditEntry, AuditLog, Outcome};
+use crate::metrics::GatewayMetrics;
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use reqwest::Client;
@@ -7,9 +8,12 @@ use std::sync::{Arc, Mutex};
 use std::time::SystemTime;
 use tokio::sync::mpsc;
 
+const CHANNEL_CAPACITY: usize = 4096;
+
 pub struct WebhookAudit {
-    tx: Arc<Mutex<Option<mpsc::UnboundedSender<Arc<AuditEntry>>>>>,
+    tx: Arc<Mutex<Option<mpsc::Sender<Arc<AuditEntry>>>>>,
     handle: Arc<Mutex<Option<tokio::task::JoinHandle<()>>>>,
+    metrics: Arc<GatewayMetrics>,
 }
 
 impl WebhookAudit {
@@ -18,10 +22,11 @@ impl WebhookAudit {
         token: Option<String>,
         cloudevents: bool,
         source: String,
+        metrics: Arc<GatewayMetrics>,
     ) -> Self {
         let url = url.into();
         let client = Client::new();
-        let (tx, mut rx) = mpsc::unbounded_channel::<Arc<AuditEntry>>();
+        let (tx, mut rx) = mpsc::channel::<Arc<AuditEntry>>(CHANNEL_CAPACITY);
 
         let handle = tokio::spawn(async move {
             while let Some(entry) = rx.recv().await {
@@ -54,6 +59,7 @@ impl WebhookAudit {
         Self {
             tx: Arc::new(Mutex::new(Some(tx))),
             handle: Arc::new(Mutex::new(Some(handle))),
+            metrics,
         }
     }
 }
@@ -120,8 +126,10 @@ impl AuditLog for WebhookAudit {
     fn record(&self, entry: Arc<AuditEntry>) {
         if let Ok(guard) = self.tx.lock()
             && let Some(tx) = guard.as_ref()
+            && tx.try_send(entry).is_err()
         {
-            let _ = tx.send(entry);
+            tracing::warn!("webhook audit channel full — entry dropped");
+            self.metrics.record_audit_drop("webhook");
         }
     }
 

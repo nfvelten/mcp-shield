@@ -162,6 +162,9 @@ async fn cmd_start(config_path: String) -> anyhow::Result<()> {
 
     let _otel_guard = init_tracing(config.telemetry.as_ref());
 
+    // Metrics is created first so audit backends can report drop events.
+    let metrics = Arc::new(GatewayMetrics::new()?);
+
     // ── Audit backends ────────────────────────────────────────────────────────
     let mut audit_backends: Vec<Arc<dyn AuditLog>> = Vec::new();
     let mut sqlite_db_path: Option<String> = None;
@@ -172,7 +175,7 @@ async fn cmd_start(config_path: String) -> anyhow::Result<()> {
         {
             sqlite_db_path = Some(path.clone());
         }
-        audit_backends.push(build_audit_backend(backend_cfg)?);
+        audit_backends.push(build_audit_backend(backend_cfg, Arc::clone(&metrics))?);
     }
     if let Some(backend_cfg) = &config.audit {
         if let AuditConfig::Sqlite { path, .. } = backend_cfg
@@ -180,7 +183,7 @@ async fn cmd_start(config_path: String) -> anyhow::Result<()> {
         {
             sqlite_db_path = Some(path.clone());
         }
-        audit_backends.push(build_audit_backend(backend_cfg)?);
+        audit_backends.push(build_audit_backend(backend_cfg, Arc::clone(&metrics))?);
     }
     if audit_backends.is_empty() {
         audit_backends.push(Arc::new(StdoutAudit));
@@ -222,10 +225,6 @@ async fn cmd_start(config_path: String) -> anyhow::Result<()> {
         config.default_policy,
     ));
     let (config_tx, config_rx) = watch::channel(live);
-
-    // Metrics is created here (before hot-reload) so the reload task can
-    // increment config_reload_failures_total on parse/IO errors.
-    let metrics = Arc::new(GatewayMetrics::new()?);
 
     // ── Hot-reload ────────────────────────────────────────────────────────────
     {
@@ -751,7 +750,10 @@ fn trunc(s: &str, max: usize) -> String {
     }
 }
 
-fn build_audit_backend(cfg: &AuditConfig) -> anyhow::Result<Arc<dyn AuditLog>> {
+fn build_audit_backend(
+    cfg: &AuditConfig,
+    metrics: Arc<GatewayMetrics>,
+) -> anyhow::Result<Arc<dyn AuditLog>> {
     match cfg {
         AuditConfig::Stdout => Ok(Arc::new(StdoutAudit)),
         AuditConfig::Sqlite {
@@ -764,6 +766,7 @@ fn build_audit_backend(cfg: &AuditConfig) -> anyhow::Result<Arc<dyn AuditLog>> {
                 path,
                 *max_entries,
                 *max_age_days,
+                metrics,
             )?))
         }
         AuditConfig::Webhook {
@@ -778,6 +781,7 @@ fn build_audit_backend(cfg: &AuditConfig) -> anyhow::Result<Arc<dyn AuditLog>> {
                 token.clone(),
                 *cloudevents,
                 source.clone(),
+                metrics,
             )))
         }
         AuditConfig::OpenLineage {
@@ -790,6 +794,7 @@ fn build_audit_backend(cfg: &AuditConfig) -> anyhow::Result<Arc<dyn AuditLog>> {
                 url,
                 token.clone(),
                 namespace.clone(),
+                metrics,
             )))
         }
     }

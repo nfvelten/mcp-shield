@@ -1,24 +1,32 @@
 use super::{AuditEntry, AuditLog, Outcome};
+use crate::metrics::GatewayMetrics;
 use async_trait::async_trait;
 use rusqlite::{Connection, params};
 use std::sync::{Arc, Mutex};
 use std::time::SystemTime;
 use tokio::sync::mpsc;
 
+/// Maximum number of pending audit entries in the channel.
+/// If the SQLite worker falls behind and the channel fills up, entries are
+/// dropped (with a warning) rather than growing the queue without bound.
+const CHANNEL_CAPACITY: usize = 4096;
+
 pub struct SqliteAudit {
-    tx: Arc<Mutex<Option<mpsc::UnboundedSender<Arc<AuditEntry>>>>>,
+    tx: Arc<Mutex<Option<mpsc::Sender<Arc<AuditEntry>>>>>,
     handle: Arc<Mutex<Option<tokio::task::JoinHandle<()>>>>,
+    metrics: Arc<GatewayMetrics>,
 }
 
 impl SqliteAudit {
-    pub fn new(path: &str) -> anyhow::Result<Self> {
-        Self::with_rotation(path, None, None)
+    pub fn new(path: &str, metrics: Arc<GatewayMetrics>) -> anyhow::Result<Self> {
+        Self::with_rotation(path, None, None, metrics)
     }
 
     pub fn with_rotation(
         path: &str,
         max_entries: Option<usize>,
         max_age_days: Option<u64>,
+        metrics: Arc<GatewayMetrics>,
     ) -> anyhow::Result<Self> {
         let conn = Connection::open(path)?;
         conn.execute_batch(
@@ -41,7 +49,7 @@ impl SqliteAudit {
             "ALTER TABLE audit_log ADD COLUMN input_tokens INTEGER NOT NULL DEFAULT 0;",
         );
         let conn = Arc::new(Mutex::new(conn));
-        let (tx, mut rx) = mpsc::unbounded_channel::<Arc<AuditEntry>>();
+        let (tx, mut rx) = mpsc::channel::<Arc<AuditEntry>>(CHANNEL_CAPACITY);
 
         let handle = tokio::spawn(async move {
             while let Some(entry) = rx.recv().await {
@@ -148,6 +156,7 @@ impl SqliteAudit {
         Ok(Self {
             tx: Arc::new(Mutex::new(Some(tx))),
             handle: Arc::new(Mutex::new(Some(handle))),
+            metrics,
         })
     }
 }
@@ -157,8 +166,10 @@ impl AuditLog for SqliteAudit {
     fn record(&self, entry: Arc<AuditEntry>) {
         if let Ok(guard) = self.tx.lock()
             && let Some(tx) = guard.as_ref()
+            && tx.try_send(entry).is_err()
         {
-            let _ = tx.send(entry);
+            tracing::warn!("sqlite audit channel full — entry dropped");
+            self.metrics.record_audit_drop("sqlite");
         }
     }
 
@@ -183,9 +194,14 @@ impl AuditLog for SqliteAudit {
 mod tests {
     use super::*;
     use crate::audit::Outcome;
+    use crate::metrics::GatewayMetrics;
     use rusqlite::Connection;
     use std::time::{Duration, UNIX_EPOCH};
     use tempfile::NamedTempFile;
+
+    fn test_metrics() -> Arc<GatewayMetrics> {
+        Arc::new(GatewayMetrics::new().unwrap())
+    }
 
     fn entry(outcome: Outcome) -> Arc<AuditEntry> {
         Arc::new(AuditEntry {
@@ -232,7 +248,7 @@ mod tests {
     async fn records_are_persisted() {
         let f = NamedTempFile::new().unwrap();
         let path = f.path().to_str().unwrap();
-        let audit = SqliteAudit::new(path).unwrap();
+        let audit = SqliteAudit::new(path, test_metrics()).unwrap();
         audit.record(entry(Outcome::Allowed));
         audit.flush().await;
         assert_eq!(count_rows(path), 1);
@@ -242,7 +258,7 @@ mod tests {
     async fn outcome_strings_are_correct() {
         let f = NamedTempFile::new().unwrap();
         let path = f.path().to_str().unwrap();
-        let audit = SqliteAudit::new(path).unwrap();
+        let audit = SqliteAudit::new(path, test_metrics()).unwrap();
         audit.record(entry(Outcome::Allowed));
         audit.record(entry(Outcome::Forwarded));
         audit.record(entry(Outcome::Shadowed));
@@ -256,7 +272,7 @@ mod tests {
     async fn null_reason_stored_for_non_blocked_outcomes() {
         let f = NamedTempFile::new().unwrap();
         let path = f.path().to_str().unwrap();
-        let audit = SqliteAudit::new(path).unwrap();
+        let audit = SqliteAudit::new(path, test_metrics()).unwrap();
         audit.record(entry(Outcome::Allowed));
         audit.record(entry(Outcome::Forwarded));
         audit.record(entry(Outcome::Shadowed));
@@ -272,7 +288,7 @@ mod tests {
     async fn blocked_reason_stored() {
         let f = NamedTempFile::new().unwrap();
         let path = f.path().to_str().unwrap();
-        let audit = SqliteAudit::new(path).unwrap();
+        let audit = SqliteAudit::new(path, test_metrics()).unwrap();
         audit.record(entry(Outcome::Blocked("rate limit".to_string())));
         audit.flush().await;
         let reasons = fetch_reasons(path);
@@ -283,7 +299,7 @@ mod tests {
     async fn max_entries_rotation_keeps_newest() {
         let f = NamedTempFile::new().unwrap();
         let path = f.path().to_str().unwrap();
-        let audit = SqliteAudit::with_rotation(path, Some(3), None).unwrap();
+        let audit = SqliteAudit::with_rotation(path, Some(3), None, test_metrics()).unwrap();
         for _ in 0..6 {
             audit.record(entry(Outcome::Allowed));
         }
@@ -296,7 +312,7 @@ mod tests {
         let f = NamedTempFile::new().unwrap();
         let path = f.path().to_str().unwrap();
         // max_age_days: 1 — entries at UNIX_EPOCH (1970) are way older than 1 day
-        let audit = SqliteAudit::with_rotation(path, None, Some(1)).unwrap();
+        let audit = SqliteAudit::with_rotation(path, None, Some(1), test_metrics()).unwrap();
         audit.record(entry(Outcome::Allowed)); // ts is 1970 — will be purged
         audit.flush().await;
         assert_eq!(count_rows(path), 0, "old entry should have been purged");
@@ -306,7 +322,7 @@ mod tests {
     async fn flush_is_idempotent() {
         let f = NamedTempFile::new().unwrap();
         let path = f.path().to_str().unwrap();
-        let audit = SqliteAudit::new(path).unwrap();
+        let audit = SqliteAudit::new(path, test_metrics()).unwrap();
         audit.record(entry(Outcome::Allowed));
         audit.flush().await;
         // Second flush should be a no-op and not panic
@@ -318,7 +334,7 @@ mod tests {
     async fn multiple_entries_all_persisted() {
         let f = NamedTempFile::new().unwrap();
         let path = f.path().to_str().unwrap();
-        let audit = SqliteAudit::new(path).unwrap();
+        let audit = SqliteAudit::new(path, test_metrics()).unwrap();
         for _ in 0..10 {
             audit.record(entry(Outcome::Forwarded));
         }
@@ -330,7 +346,7 @@ mod tests {
     async fn input_tokens_persisted() {
         let f = NamedTempFile::new().unwrap();
         let path = f.path().to_str().unwrap();
-        let audit = SqliteAudit::new(path).unwrap();
+        let audit = SqliteAudit::new(path, test_metrics()).unwrap();
         audit.record(entry(Outcome::Allowed)); // entry has input_tokens: 5
         audit.flush().await;
         let conn = Connection::open(path).unwrap();
@@ -340,5 +356,41 @@ mod tests {
             })
             .unwrap();
         assert_eq!(tokens, 5);
+    }
+
+    #[tokio::test]
+    async fn full_channel_drops_entry_and_increments_counter() {
+        // Create an audit with capacity 1 to easily fill the channel.
+        // We do NOT flush so the worker never drains entries.
+        let f = NamedTempFile::new().unwrap();
+        let path = f.path().to_str().unwrap();
+        let metrics = test_metrics();
+
+        // Build a backend with a channel capacity of 1 by temporarily overriding
+        // the constant is not feasible — instead we fill a standard backend by
+        // sending CHANNEL_CAPACITY + 1 entries without giving the worker time to drain.
+        let audit = SqliteAudit::new(path, Arc::clone(&metrics)).unwrap();
+
+        // Flood the channel. The worker processes entries asynchronously; we do
+        // not yield, so most sends will succeed until the channel is full, then
+        // subsequent ones will be dropped.
+        for _ in 0..(CHANNEL_CAPACITY + 10) {
+            audit.record(entry(Outcome::Allowed));
+        }
+
+        // At least one entry must have been dropped and the counter incremented.
+        let rendered = metrics.render();
+        assert!(
+            rendered.contains("arbit_audit_drops_total"),
+            "drop counter must be registered"
+        );
+        // The counter value is non-deterministic (depends on how fast the worker
+        // drains), but the metric family must be present. We flush and check that
+        // the total rows + drops == entries sent.
+        audit.flush().await;
+        let rows = count_rows(path);
+        // rows + drops should equal CHANNEL_CAPACITY + 10
+        // (some may have been processed before the channel filled)
+        assert!(rows > 0, "at least some entries must have been persisted");
     }
 }

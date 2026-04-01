@@ -1,3 +1,4 @@
+use super::{AuditEntry, AuditLog, Outcome};
 /// OpenLineage audit backend.
 ///
 /// Emits an OpenLineage `RunEvent` (spec 2-0-2) for every `tools/call` audit entry.
@@ -15,7 +16,7 @@
 /// | `run.facets.arbit:execution` | outcome, reason, agent_id, input_tokens          |
 /// | `inputs[0]`                  | `{namespace: agent_id, name: tool_name}`         |
 /// | `producer`                   | `"https://github.com/nfvelten/arbit"`            |
-use super::{AuditEntry, AuditLog, Outcome};
+use crate::metrics::GatewayMetrics;
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use reqwest::Client;
@@ -26,17 +27,24 @@ use tokio::sync::mpsc;
 
 const PRODUCER: &str = "https://github.com/nfvelten/arbit";
 const SCHEMA_URL: &str = "https://openlineage.io/spec/2-0-2/OpenLineage.json#/definitions/RunEvent";
+const CHANNEL_CAPACITY: usize = 4096;
 
 pub struct OpenLineageAudit {
-    tx: Arc<Mutex<Option<mpsc::UnboundedSender<Arc<AuditEntry>>>>>,
+    tx: Arc<Mutex<Option<mpsc::Sender<Arc<AuditEntry>>>>>,
     handle: Arc<Mutex<Option<tokio::task::JoinHandle<()>>>>,
+    metrics: Arc<GatewayMetrics>,
 }
 
 impl OpenLineageAudit {
-    pub fn new(url: impl Into<String>, token: Option<String>, namespace: String) -> Self {
+    pub fn new(
+        url: impl Into<String>,
+        token: Option<String>,
+        namespace: String,
+        metrics: Arc<GatewayMetrics>,
+    ) -> Self {
         let url = url.into();
         let client = Client::new();
-        let (tx, mut rx) = mpsc::unbounded_channel::<Arc<AuditEntry>>();
+        let (tx, mut rx) = mpsc::channel::<Arc<AuditEntry>>(CHANNEL_CAPACITY);
 
         let handle = tokio::spawn(async move {
             while let Some(entry) = rx.recv().await {
@@ -64,6 +72,7 @@ impl OpenLineageAudit {
         Self {
             tx: Arc::new(Mutex::new(Some(tx))),
             handle: Arc::new(Mutex::new(Some(handle))),
+            metrics,
         }
     }
 }
@@ -73,8 +82,10 @@ impl AuditLog for OpenLineageAudit {
     fn record(&self, entry: Arc<AuditEntry>) {
         if let Ok(guard) = self.tx.lock()
             && let Some(tx) = guard.as_ref()
+            && tx.try_send(entry).is_err()
         {
-            let _ = tx.send(entry);
+            tracing::warn!("openlineage audit channel full — entry dropped");
+            self.metrics.record_audit_drop("openlineage");
         }
     }
 

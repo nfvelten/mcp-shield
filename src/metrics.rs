@@ -6,8 +6,10 @@ pub struct GatewayMetrics {
     /// Per-agent token counter. Labels: `agent`, `direction` ("input" | "output").
     tokens: CounterVec,
     /// Incremented each time a config reload attempt fails (parse or I/O error).
-    /// Kept at zero when all reloads succeed — useful for alerting on bad deploys.
     config_reload_failures: Counter,
+    /// Audit entries dropped because the backend channel was full.
+    /// Labels: `backend` ("sqlite" | "webhook" | "openlineage").
+    audit_drops: CounterVec,
 }
 
 impl GatewayMetrics {
@@ -35,11 +37,21 @@ impl GatewayMetrics {
         )?;
         registry.register(Box::new(config_reload_failures.clone()))?;
 
+        let audit_drops = CounterVec::new(
+            Opts::new(
+                "arbit_audit_drops_total",
+                "Audit entries dropped because the backend channel was full",
+            ),
+            &["backend"],
+        )?;
+        registry.register(Box::new(audit_drops.clone()))?;
+
         Ok(Self {
             registry,
             requests,
             tokens,
             config_reload_failures,
+            audit_drops,
         })
     }
 
@@ -68,6 +80,12 @@ impl GatewayMetrics {
     /// Called by the hot-reload task whenever `Config::from_file` returns an error.
     pub fn record_config_reload_failure(&self) {
         self.config_reload_failures.inc();
+    }
+
+    /// Increment the audit drop counter for a specific backend.
+    /// Called when `try_send` fails because the channel is full.
+    pub fn record_audit_drop(&self, backend: &str) {
+        self.audit_drops.with_label_values(&[backend]).inc();
     }
 
     /// Render all metrics in Prometheus text exposition format.
