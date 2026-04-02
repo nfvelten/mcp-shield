@@ -23,9 +23,6 @@ agents:
     api_key: "secret-key-123"
     allowed_tools: ["*"]
     rate_limit: 100
-  tester-trusted:
-    allowed_tools: ["*"]
-    rate_limit: 100
   approver:
     allowed_tools: ["*"]
     approval_required: ["secret_dump"]
@@ -41,7 +38,7 @@ rules:
   block_prompt_injection: true
   filter_mode: block
   block_patterns: ["password=[a-zA-Z0-9]+"]
-  ip_rate_limit: 5
+  ip_rate_limit: 200 # Alto o suficiente para não travar os testes funcionais
   opa:
     policy_path: "tests/policy.rego"
 upstreams:
