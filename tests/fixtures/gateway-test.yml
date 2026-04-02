@@ -5,7 +5,7 @@ transport:
 
 agents:
   test-agent:
-    allowed_tools: ["*"] # Allow all tools to test if the REGEX filter blocks the malicious payload
+    allowed_tools: ["*"] # Allow all tools — filter tests assert on patterns, not tool policy
     rate_limit: 1000
 
 rules:

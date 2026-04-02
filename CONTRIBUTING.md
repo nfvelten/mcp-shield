@@ -73,6 +73,9 @@ tests/
   security_coverage.rs   # Payload filter and injection detection
   attack_scenarios.rs    # Real-world attack scenarios
   stdio_gateway.rs       # Stdio tests (require npx, ignored in CI)
+  fixtures/
+    gateway-test.yml     # Block patterns reference for security_coverage.rs
+    gateway-stdio.yml    # Stdio transport config for stdio_gateway.rs
 ```
 
 ## Design principles

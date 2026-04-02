@@ -147,7 +147,7 @@
 - **Schema cache**: `schema_cache.rs` caches per-agent `inputSchema` entries populated from `tools/list` responses; used by the validation middleware
 - **Expanded `AuthMiddleware`**: full allowlist/denylist enforcement and API key / JWT validation moved into the middleware pipeline
 - **Security test suite**: `attack_scenarios.rs` (SSRF, path traversal, credential leaks, SQL injection, prompt injection variants) and `security_coverage.rs` (payload filter and injection detection coverage)
-- **`gateway-test.yml`** fixture for the integration test environment
+- **`tests/fixtures/gateway-test.yml`** fixture for the integration test environment
 
 ### Changed
 - Integration tests migrated from shell scripts (`test-http.sh`, `test-stdio.sh`) to Rust (`tests/http_gateway.rs`, `tests/stdio_gateway.rs`)

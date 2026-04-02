@@ -69,6 +69,9 @@ tests/
   stdio_gateway.rs       # Stdio transport tests (marked #[ignore], require npx)
   security_coverage.rs   # Payload filtering and injection detection
   attack_scenarios.rs    # Real-world attack scenarios
+  fixtures/
+    gateway-test.yml     # Block patterns reference for security_coverage.rs
+    gateway-stdio.yml    # Stdio transport config for stdio_gateway.rs
 ```
 
 Integration tests spin up a real gateway binary + in-process dummy MCP server. The test harness is in `tests/common/mod.rs`.

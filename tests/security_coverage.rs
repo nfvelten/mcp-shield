@@ -1,8 +1,8 @@
 /// Security coverage tests.
 ///
-/// Each test wires the *actual* patterns from `gateway-test.yml` to a known
+/// Each test wires the *actual* patterns from `tests/fixtures/gateway-test.yml` to a known
 /// attack payload and asserts it is blocked/redacted.  A failing test means
-/// the default config has a gap — add or fix the pattern in `gateway-test.yml`
+/// the default config has a gap — add or fix the pattern in `tests/fixtures/gateway-test.yml`
 /// to make it green.
 ///
 /// This is the source of truth for "does our default config catch this attack?".
@@ -19,32 +19,25 @@ use tokio::sync::watch;
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
-/// Block patterns from gateway-test.yml — must stay in sync with that file.
+/// Block patterns loaded directly from tests/fixtures/gateway-test.yml.
+/// Any change to that file is immediately reflected in these tests.
 fn gateway_block_patterns() -> Vec<Regex> {
-    let raw = [
-        // Path traversal & shell
-        r"\.\./",
-        "etc/passwd",
-        "rm -rf",
-        r"eval\(",
-        // Credentials & secrets
-        "password",
-        "private_key",
-        r"(?i)BEGIN\s+(RSA\s+|EC\s+|OPENSSH\s+)?PRIVATE\s+KEY",
-        r"AKIA[0-9A-Z]{16}",
-        r"ghp_[A-Za-z0-9]{36,}",
-        r"eyJ[A-Za-z0-9\-_]{10,}\.[A-Za-z0-9\-_]+\.[A-Za-z0-9\-_]+",
-        r"(?:postgresql|mysql|mongodb|redis)://[^:]+:[^@]+@",
-        // SSRF
-        r"169\.254\.169\.254",
-        r"metadata\.google\.internal",
-        r"\[::1\]",
-        // Web attacks
-        "<script",
-        "union select",
-        "javascript:",
-    ];
-    raw.iter().map(|p| Regex::new(p).unwrap()).collect()
+    let path = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/fixtures/gateway-test.yml"
+    );
+    let content = std::fs::read_to_string(path).expect("failed to read gateway-test.yml fixture");
+    let doc: serde_yaml::Value =
+        serde_yaml::from_str(&content).expect("failed to parse gateway-test.yml");
+    doc["rules"]["block_patterns"]
+        .as_sequence()
+        .expect("rules.block_patterns not found in fixture")
+        .iter()
+        .map(|v| {
+            let s = v.as_str().expect("block_pattern entry is not a string");
+            Regex::new(s).unwrap_or_else(|e| panic!("invalid regex {s:?}: {e}"))
+        })
+        .collect()
 }
 
 /// Prompt injection patterns from prompt_injection::PATTERNS.

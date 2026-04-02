@@ -63,30 +63,13 @@ async fn exchange(child: &mut tokio::process::Child, messages: &[Value]) -> Vec<
     responses
 }
 
-const STDIO_CONFIG: &str = r#"transport:
-  type: stdio
-  server: ["npx", "-y", "@modelcontextprotocol/server-filesystem", "/tmp/mcp-test"]
-audit:
-  type: stdout
-agents:
-  cursor:
-    allowed_tools:
-      - read_file
-      - list_directory
-    rate_limit: 30
-  claude-code:
-    denied_tools:
-      - write_file
-      - delete_file
-    rate_limit: 60
-  rate-test:
-    allowed_tools:
-      - read_file
-    rate_limit: 2
-rules:
-  block_patterns:
-    - "password="
-"#;
+fn stdio_config() -> String {
+    std::fs::read_to_string(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/fixtures/gateway-stdio.yml"
+    ))
+    .expect("failed to read gateway-stdio.yml fixture")
+}
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
 
@@ -99,7 +82,7 @@ async fn stdio_initialize_and_tools_list() {
     }
     setup_test_files();
 
-    let mut gw = stdio_gateway(STDIO_CONFIG).await;
+    let mut gw = stdio_gateway(&stdio_config()).await;
     let responses = exchange(
         &mut gw,
         &[
@@ -144,7 +127,7 @@ async fn stdio_allowed_tool_returns_result() {
     }
     setup_test_files();
 
-    let mut gw = stdio_gateway(STDIO_CONFIG).await;
+    let mut gw = stdio_gateway(&stdio_config()).await;
     let responses = exchange(
         &mut gw,
         &[
@@ -172,7 +155,7 @@ async fn stdio_tool_not_in_allowlist_is_blocked() {
     }
     setup_test_files();
 
-    let mut gw = stdio_gateway(STDIO_CONFIG).await;
+    let mut gw = stdio_gateway(&stdio_config()).await;
     let responses = exchange(
         &mut gw,
         &[
@@ -203,7 +186,7 @@ async fn stdio_unknown_agent_is_blocked() {
     }
     setup_test_files();
 
-    let mut gw = stdio_gateway(STDIO_CONFIG).await;
+    let mut gw = stdio_gateway(&stdio_config()).await;
     let responses = exchange(
         &mut gw,
         &[
@@ -229,7 +212,7 @@ async fn stdio_sensitive_payload_is_blocked() {
     }
     setup_test_files();
 
-    let mut gw = stdio_gateway(STDIO_CONFIG).await;
+    let mut gw = stdio_gateway(&stdio_config()).await;
     let responses = exchange(
         &mut gw,
         &[
@@ -256,7 +239,7 @@ async fn stdio_rate_limit_blocks_after_threshold() {
     }
     setup_test_files();
 
-    let mut gw = stdio_gateway(STDIO_CONFIG).await;
+    let mut gw = stdio_gateway(&stdio_config()).await;
     let responses = exchange(
         &mut gw,
         &[

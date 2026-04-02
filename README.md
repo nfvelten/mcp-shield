@@ -91,7 +91,11 @@ docker-compose up
 
 ## Configuration
 
-The gateway is configured via a YAML file. Pass the path as the first argument, or let it default to `gateway.yml`.
+The gateway is configured via a YAML file. Pass the path as the first argument, or let it default to `gateway.yml`. Copy `gateway.example.yml` to get started:
+
+```sh
+cp gateway.example.yml gateway.yml
+```
 
 ```yaml
 transport:
@@ -786,7 +790,7 @@ transport:
 ```
 
 ```sh
-./arbit gateway-stdio.yml
+./arbit my-config.yml
 ```
 
 This is the mode used when configuring the gateway inside tools like Cursor or Claude Code — the editor talks to the gateway via stdio, and the gateway talks to the real server the same way.

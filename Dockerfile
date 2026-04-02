@@ -2,7 +2,7 @@
 # Uses musl for a fully static binary — no glibc dependency in the runtime image.
 FROM rust:alpine AS builder
 
-RUN apk add --no-cache musl-dev
+RUN apk add --no-cache musl-dev perl make
 
 WORKDIR /build
 
@@ -38,8 +38,8 @@ WORKDIR /app
 
 COPY --from=builder /build/target/release/arbit /usr/local/bin/arbit
 
-# Default config location — override with -v or ConfigMap mount
-COPY gateway.yml /app/gateway.yml
+# Bundle the example config — override at runtime with -v or ConfigMap mount
+COPY gateway.example.yml /app/gateway.yml
 
 EXPOSE 4000
 
