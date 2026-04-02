@@ -358,9 +358,12 @@ cat << 'EOF' > tests/mock-server.sh
 while read -r line; do [[ $line == *"initialize"* ]] && echo '{"jsonrpc":"2.0","id":1,"result":{"serverInfo":{"name":"ok"}}}'; done
 EOF
 chmod +x tests/mock-server.sh
-H=$(sha256sum tests/mock-server.sh | awk '{print $1}')
+# verify_binary hashes the first element of server[], so it must be the script
+# itself (absolute path). Using ["bash", "script"] would hash /usr/bin/bash instead.
+SCRIPT_ABS=$(realpath tests/mock-server.sh)
+H=$(sha256sum "$SCRIPT_ABS" | awk '{print $1}')
 cat << EOF > tests/fixtures/gateway-verify.yml
-transport: { type: stdio, server: ["bash", "tests/mock-server.sh"], verify: { sha256: "$H" } }
+transport: { type: stdio, server: ["$SCRIPT_ABS"], verify: { sha256: "$H" } }
 agents: { cursor: { allowed_tools: ["*"] } }
 EOF
 echo '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"clientInfo":{"name":"c"}}}' \
