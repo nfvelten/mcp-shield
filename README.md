@@ -307,6 +307,8 @@ agents:
 | `block_prompt_injection` | `true` to enable built-in prompt injection detection (7 patterns). Matched requests are always blocked, even in `redact` mode. Default: `false`. |
 | `ip_rate_limit` | Max `tools/call` requests per minute per client IP. Applied before per-agent limits. Optional. |
 | `validate_schema` | `true` to enable JSON schema validation of `tools/call` arguments against the `inputSchema` from `tools/list`. Requests with invalid or unexpected fields are blocked. Default: `false`. |
+| `opa.policy_path` | Path to a Rego policy file (`.rego`). When set, every `tools/call` is evaluated against the policy before reaching the upstream. Requests that do not satisfy the entrypoint are blocked. Optional. |
+| `opa.entrypoint` | Rego query to evaluate. Must resolve to a boolean. Default: `data.mcp.allow`. |
 
 ```yaml
 rules:
@@ -316,7 +318,31 @@ rules:
   filter_mode: redact          # scrub instead of block
   block_prompt_injection: true # detect "ignore previous instructions" etc.
   ip_rate_limit: 100
+  opa:
+    policy_path: policy.rego   # path to Rego policy file
+    entrypoint: data.mcp.allow # boolean query (default)
 ```
+
+**Example policy** (`policy.rego`):
+
+```rego
+package mcp
+import future.keywords.if
+
+default allow := false
+
+# Only allow read-only tools during business hours
+allow if {
+    input.tool_name == "read_file"
+}
+
+# Trusted agents can call any tool
+allow if {
+    input.agent_id == "ops-agent"
+}
+```
+
+The policy input object contains: `agent_id`, `method`, `tool_name`, `arguments`, `client_ip`. Policy file changes are picked up automatically on hot-reload.
 
 Config changes to `agents` and `rules` are picked up automatically — no restart required.
 

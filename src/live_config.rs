@@ -2,6 +2,12 @@ use crate::config::{AgentPolicy, FilterMode};
 use regex::Regex;
 use std::{collections::HashMap, sync::Arc};
 
+/// Loaded OPA policy — policy file content and the Rego query to evaluate.
+pub struct OpaPolicy {
+    pub entrypoint: String,
+    pub content: String,
+}
+
 /// Hot-reloadable configuration snapshot.
 /// Wrapped in `Arc` and broadcast via `tokio::sync::watch`.
 /// All consumers (`borrow()`) always see the latest reloaded version.
@@ -21,6 +27,8 @@ pub struct LiveConfig {
     pub filter_mode: FilterMode,
     /// Fallback policy for agents not listed in `agents`. None = block unknown agents.
     pub default_policy: Option<AgentPolicy>,
+    /// Pre-loaded OPA policy for contextual access control. None = OPA disabled.
+    pub opa_policy: Option<Arc<OpaPolicy>>,
 }
 
 #[cfg(test)]
@@ -193,6 +201,13 @@ impl LiveConfig {
             ip_rate_limit,
             filter_mode,
             default_policy,
+            opa_policy: None,
         }
+    }
+
+    /// Builder method to attach an OPA policy after construction.
+    pub fn with_opa_policy(mut self, policy: Option<Arc<OpaPolicy>>) -> Self {
+        self.opa_policy = policy;
+        self
     }
 }

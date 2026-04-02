@@ -538,6 +538,28 @@ pub struct Rules {
     /// `redact`: scrub matching values and allow the sanitised request.
     #[serde(default)]
     pub filter_mode: FilterMode,
+    /// Optional OPA policy for fine-grained, contextual access control.
+    /// When set, every `tools/call` is evaluated against the Rego policy before
+    /// reaching the upstream. Requests that do not satisfy the entrypoint are blocked.
+    #[serde(default)]
+    pub opa: Option<OpaConfig>,
+}
+
+// ── OPA ───────────────────────────────────────────────────────────────────────
+
+/// Configuration for the embedded OPA/Rego policy engine.
+#[derive(Debug, Deserialize, Clone)]
+pub struct OpaConfig {
+    /// Path to the Rego policy file (`.rego`).
+    pub policy_path: String,
+    /// Rego query to evaluate. Must resolve to a boolean.
+    /// Default: `"data.mcp.allow"`.
+    #[serde(default = "default_opa_entrypoint")]
+    pub entrypoint: String,
+}
+
+fn default_opa_entrypoint() -> String {
+    "data.mcp.allow".to_string()
 }
 
 // ── Secrets ───────────────────────────────────────────────────────────────────

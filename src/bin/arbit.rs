@@ -1,3 +1,4 @@
+use arbit::live_config::OpaPolicy;
 use arbit::{
     audit::{
         AuditLog,
@@ -15,7 +16,7 @@ use arbit::{
     live_config::LiveConfig,
     metrics::GatewayMetrics,
     middleware::{
-        Pipeline, auth::AuthMiddleware, hitl::HitlMiddleware,
+        Pipeline, auth::AuthMiddleware, hitl::HitlMiddleware, opa::OpaMiddleware,
         payload_filter::PayloadFilterMiddleware, rate_limit::RateLimitMiddleware,
         schema_validation::SchemaValidationMiddleware,
     },
@@ -238,14 +239,18 @@ async fn cmd_start(config_path: String) -> anyhow::Result<()> {
         vec![]
     };
 
-    let live = Arc::new(LiveConfig::new(
-        config.agents,
-        block_patterns,
-        injection_patterns,
-        config.rules.ip_rate_limit,
-        config.rules.filter_mode,
-        config.default_policy,
-    ));
+    let opa_policy = load_opa_policy(config.rules.opa.as_ref());
+    let live = Arc::new(
+        LiveConfig::new(
+            config.agents,
+            block_patterns,
+            injection_patterns,
+            config.rules.ip_rate_limit,
+            config.rules.filter_mode,
+            config.default_policy,
+        )
+        .with_opa_policy(opa_policy),
+    );
     let (config_tx, config_rx) = watch::channel(live);
 
     // ── Hot-reload ────────────────────────────────────────────────────────────
@@ -317,7 +322,8 @@ async fn cmd_start(config_path: String) -> anyhow::Result<()> {
         .add(Arc::new(SchemaValidationMiddleware::new(
             schema_cache.clone(),
         )))
-        .add(Arc::new(PayloadFilterMiddleware::new(config_rx.clone())));
+        .add(Arc::new(PayloadFilterMiddleware::new(config_rx.clone())))
+        .add(Arc::new(OpaMiddleware::new(config_rx.clone())));
 
     // ── OAuth manager (shared between transport callback + HttpUpstream) ───────
     let oauth_manager = Arc::new(OAuthManager::new());
@@ -913,6 +919,23 @@ fn build_audit_backend(
     }
 }
 
+fn load_opa_policy(cfg: Option<&arbit::config::OpaConfig>) -> Option<Arc<OpaPolicy>> {
+    let cfg = cfg?;
+    match std::fs::read_to_string(&cfg.policy_path) {
+        Ok(content) => {
+            tracing::info!(path = %cfg.policy_path, entrypoint = %cfg.entrypoint, "OPA policy loaded");
+            Some(Arc::new(OpaPolicy {
+                entrypoint: cfg.entrypoint.clone(),
+                content,
+            }))
+        }
+        Err(e) => {
+            tracing::warn!(path = %cfg.policy_path, error = %e, "failed to load OPA policy — OPA disabled");
+            None
+        }
+    }
+}
+
 fn do_reload(
     reload_path: &str,
     tx: &tokio::sync::watch::Sender<Arc<LiveConfig>>,
@@ -942,14 +965,18 @@ fn do_reload(
             } else {
                 vec![]
             };
-            let new_live = Arc::new(LiveConfig::new(
-                new_cfg.agents,
-                new_patterns,
-                new_injection,
-                new_cfg.rules.ip_rate_limit,
-                new_cfg.rules.filter_mode,
-                new_cfg.default_policy,
-            ));
+            let new_opa = load_opa_policy(new_cfg.rules.opa.as_ref());
+            let new_live = Arc::new(
+                LiveConfig::new(
+                    new_cfg.agents,
+                    new_patterns,
+                    new_injection,
+                    new_cfg.rules.ip_rate_limit,
+                    new_cfg.rules.filter_mode,
+                    new_cfg.default_policy,
+                )
+                .with_opa_policy(new_opa),
+            );
             if tx.send(new_live).is_ok() {
                 tracing::info!(path = reload_path, "config reloaded");
             }
